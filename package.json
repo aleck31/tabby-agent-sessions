@@ -8,10 +8,21 @@
   "main": "dist/index.js",
   "license": "MIT",
   "author": "aleck31",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aleck31/tabby-agent-sessions.git"
+  },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "webpack --progress --color",
     "watch": "webpack --progress --color --watch",
-    "check": "tsc --noEmit && node scripts/check-template.mjs"
+    "check": "tsc --noEmit && node scripts/check-template.mjs",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@angular/common": "^15.2.10",
