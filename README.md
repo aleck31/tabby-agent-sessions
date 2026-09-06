@@ -14,6 +14,7 @@ Tabby has no sidebar extension point (verified against `builtin-plugins/*/typing
 - the hover `✕` deletes via `asbutler rm`, behind a native confirm dialog that defaults to Cancel. **Permanent** — asbutler unlinks the file and the JSON exposes no path for the plugin to trash it instead
 - cmd/ctrl-click toggles rows and shift-click extends a range; with two or more selected, a Delete bar removes them in one `asbutler rm` call, skipping any held by a running agent
 - agent chips filter the rows already fetched, so switching filters costs nothing; sessions whose directory no longer exists are badged `orphan`
+- while a directory switch is in flight the previous rows are dimmed and inert, so an action can't land on the directory you just left
 
 ## Requirements
 
@@ -38,8 +39,9 @@ Restart Tabby to load a rebuilt bundle — it reads plugins once at startup.
 ## Known gaps
 
 - delete is permanent, and can't be made recoverable here — asbutler unlinks the file and the JSON row exposes no path, which also rules out reveal-in-Finder entirely
-- no bulk select yet, though `asbutler rm` already takes several ids
 - no `TabRecoveryProvider`, so the pane doesn't survive a restart (and `recoverTabs` is off in this config anyway)
-- switching directory costs a fresh ~1s subprocess, with no affordance beyond the header glyph — the rows blank out rather than staying visible while the new query runs
+- switching directory still costs a fresh ~1s `asbutler` subprocess; the pane makes that legible rather than faster, since querying more widely is the wrong fix
+
+Managing sessions across directories is deliberately not here — that's what `asbutler webui` is for. This pane only ever deals with the focused terminal's directory.
 
 Note the 2s cwd poll is **not** a gap: `focusChanged$` alone misses a plain `cd`, which Tabby emits no event for. Removing it leaves the directory silently stale.

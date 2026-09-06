@@ -131,13 +131,17 @@ function runAsbutlerRm(bin: string, ids: string[]): Promise<RemoveResult[]> {
     <div class="as-panel">
       <div class="as-head">
         <strong>Agent Sessions</strong>
-        <button class="btn btn-link btn-sm" (click)="refresh()" [disabled]="loading">
-          {{ loading ? '…' : '↻' }}
+        <button class="btn btn-link btn-sm" (click)="refresh()" [disabled]="loading"
+                [title]="loading ? 'Loading…' : 'Refresh'">
+          <span class="as-spin" *ngIf="loading"></span>
+          <span *ngIf="!loading">↻</span>
         </button>
       </div>
       <div class="as-cwd" [title]="cwd || ''">{{ cwd || 'no local directory' }}</div>
       <div class="as-err" *ngIf="error">{{ error }}</div>
 
+      <!-- Dimmed and inert while these rows belong to a directory we have already left. -->
+      <div class="as-body" [class.as-stale]="stale">
       <!-- Filters the rows already fetched; re-querying with -a would cost another subprocess. -->
       <div class="as-chips" *ngIf="agentCounts.length > 1">
         <button class="as-chip" [class.as-chip-on]="agentFilter === null"
@@ -181,6 +185,7 @@ function runAsbutlerRm(bin: string, ids: string[]): Promise<RemoveResult[]> {
                   (click)="$event.stopPropagation(); remove(s)">✕</button>
         </span>
       </div>
+      </div>
     </div>
   `,
   styles: [`
@@ -193,6 +198,12 @@ function runAsbutlerRm(bin: string, ids: string[]): Promise<RemoveResult[]> {
     .as-cwd { opacity: .6; word-break: break-all; margin: 4px 0 8px; font-family: monospace; }
     .as-err { color: #e57373; margin-bottom: 8px; }
     .as-empty { opacity: .5; font-style: italic; }
+    /* Inert as well as dim: acting on a stale row would hit the directory we just left. */
+    .as-stale { opacity: .4; pointer-events: none; }
+    .as-spin { display: inline-block; width: 9px; height: 9px; vertical-align: -1px;
+               border: 2px solid currentColor; border-right-color: transparent;
+               border-radius: 50%; animation: as-rot .7s linear infinite; }
+    @keyframes as-rot { to { transform: rotate(360deg); } }
     .as-row { position: relative; padding: 6px 4px; margin: 0;
               border-top: 1px solid rgba(255,255,255,.08); border-radius: 3px; }
     .as-row:hover { background: rgba(127, 127, 127, .12); }
@@ -235,6 +246,8 @@ export class SessionListTabComponent extends BaseTabComponent {
   error: string | null = null
   loading = false
 
+  /** The directory `sessions` was fetched for, so staleness is a fact rather than a guess. */
+  private sessionsCwd: string | null = null
   /** Anchor for shift-click ranges. */
   private anchorId: string | null = null
   private pollTimer: any
@@ -266,6 +279,11 @@ export class SessionListTabComponent extends BaseTabComponent {
     return command
       ? `Double-click to run in the terminal beside this list:\n${command}`
       : `No resume command known for ${s.agent}`
+  }
+
+  /** Rows on screen belong to a directory we have already left, so they must not be acted on. */
+  get stale(): boolean {
+    return this.cwd !== this.sessionsCwd
   }
 
   /** Plain click replaces the selection; cmd/ctrl toggles one; shift extends from the anchor. */
@@ -518,6 +536,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     this.error = null
     if (!cwd) {
       this.sessions = []
+      this.sessionsCwd = cwd
       this.applyFilter()
       this.loading = false
       return
@@ -538,6 +557,7 @@ export class SessionListTabComponent extends BaseTabComponent {
       }
       // Parse, don't string-compare: modifiedAt carries a numeric offset, so lexical order breaks across offsets.
       this.sessions = sessions.sort((a, b) => Date.parse(b.modifiedAt) - Date.parse(a.modifiedAt))
+      this.sessionsCwd = cwd
       this.applyFilter()
     } catch (e: any) {
       if (generation !== this.generation) {
@@ -545,6 +565,7 @@ export class SessionListTabComponent extends BaseTabComponent {
       }
       this.error = e.message ?? String(e)
       this.sessions = []
+      this.sessionsCwd = cwd
       this.applyFilter()
     } finally {
       if (generation === this.generation) {
