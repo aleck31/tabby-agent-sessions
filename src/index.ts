@@ -3,15 +3,13 @@ import { Injectable, NgModule } from '@angular/core'
 import {
   AppService,
   ConfigProvider,
-  ConfigService,
-  SplitContainer,
   SplitTabComponent,
   TabsService,
   ToolbarButton,
   ToolbarButtonProvider,
 } from 'tabby-core'
 
-import { SessionListTabComponent } from './sessionList.component'
+import { DEFAULT_PANE_WIDTH_PX, SessionListTabComponent } from './sessionList.component'
 
 const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
   <rect x="1" y="2" width="4.5" height="12" rx="1" opacity=".55"/>
@@ -23,7 +21,6 @@ export class AgentSessionsButtonProvider extends ToolbarButtonProvider {
   constructor(
     private app: AppService,
     private tabs: TabsService,
-    private config: ConfigService,
   ) {
     super()
   }
@@ -52,37 +49,19 @@ export class AgentSessionsButtonProvider extends ToolbarButtonProvider {
 
     const relative = top.getFocusedTab() ?? top.getAllTabs()[0] ?? null
     const panel = this.tabs.create({ type: SessionListTabComponent })
-    await top.addTab(panel, relative, 'l')
-    this.applyRatio(top, panel)
-  }
-
-  /** Initial width only — the spanner stays draggable afterwards. */
-  private applyRatio(top: SplitTabComponent, panel: SessionListTabComponent): void {
-    const share = this.config.store.agentSessions?.width ?? 0.3
-    const container: SplitContainer | null = top.getParentOf(panel)
-    const index = container?.children.indexOf(panel) ?? -1
-    if (!container || index < 0 || container.ratios.length < 2) {
-      return
-    }
-
-    const rest = container.ratios.reduce((sum, r, i) => i === index ? sum : sum + r, 0)
-    const siblings = container.ratios.length - 1
-    container.ratios = container.ratios.map((r, i) =>
-      i === index
-        ? share
-        : rest > 0 ? r / rest * (1 - share) : (1 - share) / siblings,
-    )
-    top.layout()
+    await top.addTab(panel, relative, 'r')
+    // Width is the pane's own business — it has to hold it across window resizes.
   }
 }
 
-/** Needs asbutler >= 0.6.0 (JSON by default); set an absolute path here if it's not on PATH. */
+/** Needs asbutler >= 0.6.1; set an absolute path here if it's not on PATH. */
 @Injectable()
 export class AgentSessionsConfigProvider extends ConfigProvider {
   defaults = {
     agentSessions: {
       binary: 'asbutler',
-      width: 0.3,
+      /** px, not a ratio — see DEFAULT_PANE_WIDTH_PX and the pane's holdWidth(). */
+      width: DEFAULT_PANE_WIDTH_PX,
     },
   }
 }
