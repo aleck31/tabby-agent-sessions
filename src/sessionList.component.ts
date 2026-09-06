@@ -48,6 +48,18 @@ function resolveBinary(configured: string): string | null {
 /** Single source for the default; index.ts feeds it to the ConfigProvider. */
 export const DEFAULT_PANE_WIDTH_PX = 360
 
+/** Only for summing a batch; single rows use asbutler's own sizeHuman. */
+function humanSize(bytes: number): string {
+  const units = ['B', 'KiB', 'MiB', 'GiB']
+  let n = bytes
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${i === 0 ? n : n.toFixed(1)} ${units[i]}`
+}
+
 /**
  * Keyed on asbutler's `agent` string. Absent agent = no resume, rather than a guessed
  * command that would launch the wrong thing; asbutler itself has no resume subcommand.
@@ -100,9 +112,9 @@ interface RemoveResult {
  * `rm` exits non-zero on failure but still prints the reason as JSON, so stdout is
  * parsed regardless of the exit code — the exec error alone loses the actual cause.
  */
-function runAsbutlerRm(bin: string, id: string): Promise<RemoveResult[]> {
+function runAsbutlerRm(bin: string, ids: string[]): Promise<RemoveResult[]> {
   return new Promise((resolve, reject) => {
-    execFile(bin, ['rm', id], { maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    execFile(bin, ['rm', ...ids], { maxBuffer: 1024 * 1024 }, (err, stdout) => {
       try {
         resolve(JSON.parse(stdout))
       } catch {
@@ -125,18 +137,36 @@ function runAsbutlerRm(bin: string, id: string): Promise<RemoveResult[]> {
       </div>
       <div class="as-cwd" [title]="cwd || ''">{{ cwd || 'no local directory' }}</div>
       <div class="as-err" *ngIf="error">{{ error }}</div>
+
+      <!-- Filters the rows already fetched; re-querying with -a would cost another subprocess. -->
+      <div class="as-chips" *ngIf="agentCounts.length > 1">
+        <button class="as-chip" [class.as-chip-on]="agentFilter === null"
+                (click)="setAgentFilter(null)">All {{ sessions.length }}</button>
+        <button class="as-chip" *ngFor="let a of agentCounts"
+                [class.as-chip-on]="agentFilter === a.agent"
+                (click)="setAgentFilter(a.agent)">{{ a.agent }} {{ a.count }}</button>
+      </div>
+
+      <div class="as-bulk" *ngIf="selectedIds.size > 1">
+        <span>{{ selectedIds.size }} selected</span>
+        <button class="as-act" (click)="clearSelection()">Clear</button>
+        <button class="as-act as-danger" (click)="removeSelected()">Delete</button>
+      </div>
+
       <!-- No cwd and no sessions are different answers; say which one this is. -->
-      <div class="as-empty" *ngIf="!error && !loading && sessions.length === 0">
+      <div class="as-empty" *ngIf="!error && !loading && visible.length === 0">
         {{ emptyMessage }}
       </div>
-      <div class="as-row" *ngFor="let s of sessions"
-           [class.as-selected]="s.id === selectedId"
+      <div class="as-row" *ngFor="let s of visible"
+           [class.as-selected]="selectedIds.has(s.id)"
            [title]="rowHint(s)"
-           (click)="selectedId = s.id"
+           (click)="onRowClick(s, $event)"
            (dblclick)="resume(s)">
         <div class="as-line1">
           <span class="as-when">{{ s.modifiedAt | date: 'MM-dd HH:mm' }}</span>
           <span class="as-id">{{ s.id.slice(0, 8) }}</span>
+          <span class="as-orphan" *ngIf="s.orphan"
+                title="This session's directory no longer exists">orphan</span>
           <span class="as-lock" *ngIf="s.locked" title="held by a running agent">🔒</span>
           <span class="as-size">{{ s.sizeHuman }}</span>
         </div>
@@ -176,9 +206,19 @@ function runAsbutlerRm(bin: string, id: string): Promise<RemoveResult[]> {
               opacity: .55; cursor: pointer; font-size: 12px; line-height: 1; }
     .as-act:hover { opacity: 1; }
     .as-act.as-danger:hover { color: #e57373; }
+    .as-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+    .as-chip { background: rgba(127, 127, 127, .15); border: 0; border-radius: 9px;
+               padding: 2px 8px; color: inherit; opacity: .7; cursor: pointer; font-size: 11px; }
+    .as-chip:hover { opacity: 1; }
+    .as-chip.as-chip-on { background: rgba(140, 180, 255, .3); opacity: 1; }
+    .as-bulk { display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+               padding: 4px 6px; border-radius: 3px; background: rgba(140, 180, 255, .16); }
     .as-line1 { display: flex; gap: 6px; align-items: center; }
     .as-when { font-weight: 600; font-variant-numeric: tabular-nums; }
     .as-id { opacity: .45; font-family: monospace; }
+    /* Amber, not red: an orphan is stale, not broken, and red is the delete affordance. */
+    .as-orphan { color: #e0a33e; border: 1px solid rgba(224, 163, 62, .5);
+                 border-radius: 3px; padding: 0 3px; font-size: 10px; }
     .as-size { margin-left: auto; opacity: .6; }
     .as-title { margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .as-meta { opacity: .5; }
@@ -187,10 +227,16 @@ function runAsbutlerRm(bin: string, id: string): Promise<RemoveResult[]> {
 export class SessionListTabComponent extends BaseTabComponent {
   cwd: string | null = null
   sessions: AgentSession[] = []
-  selectedId: string | null = null
+  /** Rows after the agent filter; kept as a field so the template isn't rebuilding arrays. */
+  visible: AgentSession[] = []
+  agentCounts: { agent: string, count: number }[] = []
+  agentFilter: string | null = null
+  selectedIds = new Set<string>()
   error: string | null = null
   loading = false
 
+  /** Anchor for shift-click ranges. */
+  private anchorId: string | null = null
   private pollTimer: any
   /** Discards responses from a query the cwd has already moved past. */
   private generation = 0
@@ -222,22 +268,78 @@ export class SessionListTabComponent extends BaseTabComponent {
       : `No resume command known for ${s.agent}`
   }
 
+  /** Plain click replaces the selection; cmd/ctrl toggles one; shift extends from the anchor. */
+  onRowClick(s: AgentSession, event: MouseEvent): void {
+    if (event.shiftKey && this.anchorId) {
+      const from = this.visible.findIndex(x => x.id === this.anchorId)
+      const to = this.visible.findIndex(x => x.id === s.id)
+      if (from >= 0 && to >= 0) {
+        const [lo, hi] = from <= to ? [from, to] : [to, from]
+        this.selectedIds = new Set(this.visible.slice(lo, hi + 1).map(x => x.id))
+        return
+      }
+    }
+    if (event.metaKey || event.ctrlKey) {
+      this.selectedIds.has(s.id) ? this.selectedIds.delete(s.id) : this.selectedIds.add(s.id)
+    } else {
+      this.selectedIds = new Set([s.id])
+    }
+    this.anchorId = s.id
+  }
+
+  clearSelection(): void {
+    this.selectedIds = new Set()
+    this.anchorId = null
+  }
+
+  setAgentFilter(agent: string | null): void {
+    this.agentFilter = agent
+    // Clear first: a selection kept across a filter change would let Delete hit hidden rows.
+    this.clearSelection()
+    this.applyFilter()
+  }
+
+  /** Recomputed on data or filter change, so the template reads a stable array. */
+  private applyFilter(): void {
+    this.visible = this.agentFilter
+      ? this.sessions.filter(s => s.agent === this.agentFilter)
+      : this.sessions
+    const counts = new Map<string, number>()
+    for (const s of this.sessions) {
+      counts.set(s.agent, (counts.get(s.agent) ?? 0) + 1)
+    }
+    this.agentCounts = [...counts].map(([agent, count]) => ({ agent, count }))
+    // A filter whose agent no longer has rows would hide everything with no way back.
+    if (this.agentFilter && !counts.has(this.agentFilter)) {
+      this.agentFilter = null
+      this.visible = this.sessions
+    }
+  }
+
+  remove(s: AgentSession): Promise<void> {
+    return this.removeSessions([s])
+  }
+
+  removeSelected(): Promise<void> {
+    return this.removeSessions(this.sessions.filter(s => this.selectedIds.has(s.id)))
+  }
+
   /** Permanent: asbutler unlinks the file, and the JSON exposes no path for us to trash instead. */
-  async remove(s: AgentSession): Promise<void> {
-    if (s.locked) {
-      this.notifications.error('A running agent holds this session — stop it before deleting')
+  private async removeSessions(targets: AgentSession[]): Promise<void> {
+    // Locked sessions are skipped rather than failing the batch — a live agent holds them.
+    const locked = targets.filter(s => s.locked)
+    const doomed = targets.filter(s => !s.locked)
+    if (!doomed.length) {
+      this.notifications.error('A running agent holds these sessions — stop it before deleting')
       return
     }
 
     const { response } = await this.platform.showMessageBox({
       type: 'warning',
-      message: 'Delete this session permanently?',
-      detail: [
-        `${s.agent} · ${s.messageCount} msgs · ${s.sizeHuman}`,
-        s.title || s.id,
-        '',
-        'This cannot be undone.',
-      ].join('\n'),
+      message: doomed.length === 1
+        ? 'Delete this session permanently?'
+        : `Delete ${doomed.length} sessions permanently?`,
+      detail: this.removalDetail(doomed, locked),
       buttons: ['Cancel', 'Delete'],
       defaultId: 0,
       cancelId: 0,
@@ -251,17 +353,33 @@ export class SessionListTabComponent extends BaseTabComponent {
       if (!bin) {
         throw new Error(`'${this.bin}' not found`)
       }
-      const failed = (await runAsbutlerRm(bin, s.id)).find(r => !r.deleted)
-      if (failed) {
-        throw new Error(failed.error ?? 'asbutler reported the session was not deleted')
+      const results = await runAsbutlerRm(bin, doomed.map(s => s.id))
+      const gone = new Set(results.filter(r => r.deleted).map(r => r.id))
+      this.sessions = this.sessions.filter(s => !gone.has(s.id))
+      gone.forEach(id => this.selectedIds.delete(id))
+      this.applyFilter()
+
+      const failed = results.filter(r => !r.deleted)
+      if (failed.length) {
+        throw new Error(failed[0].error ?? 'asbutler reported the session was not deleted')
       }
-      if (this.selectedId === s.id) {
-        this.selectedId = null
-      }
-      this.sessions = this.sessions.filter(x => x.id !== s.id)
     } catch (e: any) {
       this.notifications.error(`Delete failed: ${e.message ?? String(e)}`)
     }
+  }
+
+  private removalDetail(doomed: AgentSession[], locked: AgentSession[]): string {
+    const lines = doomed.length === 1
+      ? [`${doomed[0].agent} · ${doomed[0].messageCount} msgs · ${doomed[0].sizeHuman}`,
+         doomed[0].title || doomed[0].id]
+      : [`${doomed.reduce((n, s) => n + s.messageCount, 0)} messages, ` +
+         `${humanSize(doomed.reduce((n, s) => n + s.fileSize, 0))} total`,
+         ...doomed.slice(0, 6).map(s => `· ${s.id.slice(0, 8)}  ${s.title || '(untitled)'}`),
+         ...(doomed.length > 6 ? [`· …and ${doomed.length - 6} more`] : [])]
+    if (locked.length) {
+      lines.push('', `${locked.length} held by a running agent will be skipped.`)
+    }
+    return [...lines, '', 'This cannot be undone.'].join('\n')
   }
 
   /** Types into the adjacent terminal, never spawns — ADR-0001 D7. */
@@ -391,7 +509,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     }
     this.cwd = next
     // A selection belongs to the directory it was made in; a plain refresh keeps it.
-    this.selectedId = null
+    this.clearSelection()
     this.load(next)
   }
 
@@ -400,6 +518,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     this.error = null
     if (!cwd) {
       this.sessions = []
+      this.applyFilter()
       this.loading = false
       return
     }
@@ -419,12 +538,14 @@ export class SessionListTabComponent extends BaseTabComponent {
       }
       // Parse, don't string-compare: modifiedAt carries a numeric offset, so lexical order breaks across offsets.
       this.sessions = sessions.sort((a, b) => Date.parse(b.modifiedAt) - Date.parse(a.modifiedAt))
+      this.applyFilter()
     } catch (e: any) {
       if (generation !== this.generation) {
         return
       }
       this.error = e.message ?? String(e)
       this.sessions = []
+      this.applyFilter()
     } finally {
       if (generation === this.generation) {
         this.loading = false

@@ -12,6 +12,8 @@ Tabby has no sidebar extension point (verified against `builtin-plugins/*/typing
 - session data comes from `asbutler list --path <cwd>` (JSON) — parsing is *not* reimplemented here, so adding an agent in Go surfaces it in Tabby for free
 - a click selects a row; **double-click** (or the hover `▶`) types that agent's resume command into the adjacent terminal (`claude --resume <id>`, `kiro-cli chat --resume-id <id>`). Refused for a `locked` session, for an agent with no known resume command, and while that terminal is running something
 - the hover `✕` deletes via `asbutler rm`, behind a native confirm dialog that defaults to Cancel. **Permanent** — asbutler unlinks the file and the JSON exposes no path for the plugin to trash it instead
+- cmd/ctrl-click toggles rows and shift-click extends a range; with two or more selected, a Delete bar removes them in one `asbutler rm` call, skipping any held by a running agent
+- agent chips filter the rows already fetched, so switching filters costs nothing; sessions whose directory no longer exists are badged `orphan`
 
 ## Requirements
 
