@@ -9,7 +9,8 @@ import {
   ToolbarButtonProvider,
 } from 'tabby-core'
 
-import { DEFAULT_PANE_WIDTH_PX, SessionListTabComponent } from './sessionList.component'
+import { DEFAULT_PANE_WIDTH_PX } from './paneWidth'
+import { SessionListTabComponent } from './sessionList.component'
 
 const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
   <rect x="1" y="2" width="4.5" height="12" rx="1" opacity=".55"/>

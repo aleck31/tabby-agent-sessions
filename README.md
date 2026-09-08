@@ -28,7 +28,8 @@ The binary is resolved by searching `~/.local/bin`, `/opt/homebrew/bin`, `/usr/l
 
 ```bash
 npm install
-npm run check          # tsc --noEmit + Angular template parse
+npm run check          # tsc --noEmit + Angular template parse + unit tests
+npm test               # asbutler transport/parsing only; needs no Angular
 npm run build          # or: npm run watch
 ln -sfn "$PWD" ~/Library/Application\ Support/tabby/plugins/node_modules/tabby-agent-sessions
 ```

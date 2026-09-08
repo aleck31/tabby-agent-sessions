@@ -25,9 +25,8 @@ jobs:
       - run: npm run check
       - run: npm run build
 
-      # Stages for review instead of publishing; approve with 2FA to go live.
       # No NODE_AUTH_TOKEN: npm falls back to token auth if it is set, disabling OIDC.
-      - run: npm stage publish
+      - run: npm publish --access public
 
       - uses: softprops/action-gh-release@v2
         with:

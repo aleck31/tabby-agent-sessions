@@ -1,67 +1,26 @@
-import { execFile } from 'child_process'
-import { accessSync, constants } from 'fs'
-import { homedir } from 'os'
-import { join } from 'path'
 import { Component, ElementRef, Injector } from '@angular/core'
 import {
   BaseTabComponent,
   NotificationsService,
   PlatformService,
-  SplitContainer,
   SplitTabComponent,
 } from 'tabby-core'
 
-/** GUI apps inherit a minimal PATH from launchd, so resolve the binary ourselves. */
-const SEARCH_DIRS = [
-  join(homedir(), '.local', 'bin'),
-  '/opt/homebrew/bin',
-  '/usr/local/bin',
-  '/usr/bin',
-]
-
-function isExecutable(p: string): boolean {
-  try {
-    accessSync(p, constants.X_OK)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function resolveBinary(configured: string): string | null {
-  const expanded = configured.startsWith('~')
-    ? join(homedir(), configured.slice(1))
-    : configured
-  if (expanded.includes('/')) {
-    return isExecutable(expanded) ? expanded : null
-  }
-  const dirs = [...SEARCH_DIRS, ...(process.env.PATH ?? '').split(':').filter(Boolean)]
-  for (const dir of dirs) {
-    const candidate = join(dir, expanded)
-    if (isExecutable(candidate)) {
-      return candidate
-    }
-  }
-  return null
-}
+import {
+  AgentSession,
+  Runner,
+  SEARCH_DIRS,
+  humanSize,
+  listSessions,
+  localRunner,
+  remoteRunner,
+  removeSessions as asbutlerRemove,
+  resolveBinary,
+} from './asbutler'
+import { PaneWidth } from './paneWidth'
 
 /** Injected by webpack's DefinePlugin; tells you which bundle Tabby actually loaded. */
 declare const __PLUGIN_BUILD__: string
-
-/** Single source for the default; index.ts feeds it to the ConfigProvider. */
-export const DEFAULT_PANE_WIDTH_PX = 360
-
-/** Only for summing a batch; single rows use asbutler's own sizeHuman. */
-function humanSize(bytes: number): string {
-  const units = ['B', 'KiB', 'MiB', 'GiB']
-  let n = bytes
-  let i = 0
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024
-    i++
-  }
-  return `${i === 0 ? n : n.toFixed(1)} ${units[i]}`
-}
 
 /**
  * Keyed on asbutler's `agent` string. Absent agent = no resume, rather than a guessed
@@ -70,128 +29,6 @@ function humanSize(bytes: number): string {
 const RESUME_ARGV: Record<string, (id: string) => string[]> = {
   'Claude Code': id => ['claude', '--resume', id],
   Kiro: id => ['kiro-cli', 'chat', '--resume-id', id],
-}
-
-export interface AgentSession {
-  id: string
-  agent: string
-  cwd: string
-  profile: string
-  orphan: boolean
-  title: string
-  messageCount: number
-  fileSize: number
-  sizeHuman: string
-  modifiedAt: string
-  locked: boolean
-}
-
-/**
- * asbutler owns session parsing; `--path` must narrow before it enriches. ADR-0002 D1/D2.
- */
-async function runAsbutler(runner: Runner, cwd: string): Promise<AgentSession[]> {
-  const stdout = await runner.run(['list', '--path', cwd])
-  try {
-    return JSON.parse(stdout).sessions ?? []
-  } catch {
-    throw new Error(
-      `asbutler on ${runner.where} returned non-JSON output — needs asbutler >= 0.6.1`,
-    )
-  }
-}
-
-/** Runs asbutler wherever the terminal actually is — this machine, or the host it is on. */
-interface Runner {
-  remote: boolean
-  where: string
-  run(argv: string[]): Promise<string>
-}
-
-function quoteArgv(argv: string[]): string {
-  return argv.map(a => `'${a.replace(/'/g, `'\\''`)}'`).join(' ')
-}
-
-const MISSING_MARKER = '__asbutler_missing__'
-
-/**
- * Presence is proved in stdout, not guessed from stderr: russh exposes no exit status,
- * and stderr wording is shell- and locale-dependent. `if` rather than `||`, so asbutler's
- * own non-zero exits are not mistaken for it being absent.
- */
-function remoteCommand(argv: string[]): string {
-  return `if command -v asbutler >/dev/null 2>&1; then ${quoteArgv(argv)}; ` +
-    `else echo ${MISSING_MARKER}; fi`
-}
-
-/**
- * Execs over Tabby's already-authenticated russh connection, so there is no second
- * login and no key prompt. Reads until eof/close, since exec has no other end marker.
- */
-function runOverSsh(client: any, argv: string[], where: string, timeoutMs = 10000): Promise<string> {
-  return new Promise(async (resolve, reject) => {
-    const out: Buffer[] = []
-    const err: Buffer[] = []
-    let channel: any
-    let done = false
-
-    const finish = (failure?: Error) => {
-      if (done) {
-        return
-      }
-      done = true
-      clearTimeout(timer)
-      channel?.close?.()?.catch?.(() => {})
-      if (failure) {
-        reject(failure)
-        return
-      }
-      const stdout = Buffer.concat(out).toString('utf8')
-      const stderr = Buffer.concat(err).toString('utf8')
-      if (stdout.includes(MISSING_MARKER) || /not found|No such file/i.test(stderr)) {
-        reject(new Error(`asbutler is not installed on ${where}`))
-        return
-      }
-      stdout.trim()
-        ? resolve(stdout)
-        : reject(new Error(stderr.trim() || `asbutler on ${where} produced no output`))
-    }
-
-    // Armed before opening the channel: a hang in activation left this pending forever.
-    const timer = setTimeout(
-      () => finish(new Error(`asbutler on ${where} did not respond within ${timeoutMs / 1000}s`)),
-      timeoutMs,
-    )
-
-    try {
-      channel = await client.activateChannel(await client.openSessionChannel())
-      channel.data$?.subscribe((d: any) => out.push(Buffer.from(d)))
-      channel.extendedData$?.subscribe((d: any) => err.push(Buffer.from(d?.data ?? d)))
-      channel.eof$?.subscribe(() => finish())
-      channel.closed$?.subscribe(() => finish())
-      await channel.requestExec(remoteCommand(argv))
-    } catch (e: any) {
-      finish(e instanceof Error ? e : new Error(String(e)))
-    }
-  })
-}
-
-interface RemoveResult {
-  id: string
-  deleted: boolean
-  error?: string
-}
-
-/**
- * `rm` exits non-zero on failure but still prints the reason as JSON, so stdout is
- * parsed regardless of the exit code — the exec error alone loses the actual cause.
- */
-async function runAsbutlerRm(runner: Runner, ids: string[]): Promise<RemoveResult[]> {
-  const stdout = await runner.run(['rm', ...ids])
-  try {
-    return JSON.parse(stdout)
-  } catch {
-    throw new Error(`asbutler rm on ${runner.where} returned non-JSON output`)
-  }
 }
 
 @Component({
@@ -337,9 +174,12 @@ export class SessionListTabComponent extends BaseTabComponent {
   private pollTimer: any
   /** Discards responses from a query the cwd has already moved past. */
   private generation = 0
-  /** The width to hold, in px; the ratio Tabby wants is recomputed from it. ADR-0001 D2. */
-  private pinnedPx: number = this.config.store.agentSessions?.width ?? DEFAULT_PANE_WIDTH_PX
-  private onWindowResize = () => this.holdWidth()
+  /** Pixel width inside Tabby's fractional split model; all of it lives in PaneWidth. */
+  private width = new PaneWidth(
+    this,
+    this.el.nativeElement,
+    this.config.store.agentSessions?.width,
+  )
 
   constructor(
     injector: Injector,
@@ -453,7 +293,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     try {
       // Same transport as the listing, or a remote row's delete would run here instead.
       const runner = this.runnerFor(this.focusedSibling()?.session)
-      const results = await runAsbutlerRm(runner, doomed.map(s => s.id))
+      const results = await asbutlerRemove(runner, doomed.map(s => s.id))
       const gone = new Set(results.filter(r => r.deleted).map(r => r.id))
       this.sessions = this.sessions.filter(s => !gone.has(s.id))
       gone.forEach(id => this.selectedIds.delete(id))
@@ -543,64 +383,17 @@ export class SessionListTabComponent extends BaseTabComponent {
     if (parent instanceof SplitTabComponent) {
       this.subscribeUntilDestroyed(parent.focusChanged$, () => this.syncCwd())
       // A drag re-pins to the width it settled on, rather than reverting to proportional.
-      this.subscribeUntilDestroyed(parent.splitAdjusted$, () => this.adoptWidth())
+      this.subscribeUntilDestroyed(parent.splitAdjusted$, () => this.width.adopt())
     }
-    // Window resize only — a ResizeObserver here broke dragging. ADR-0001 D2.
-    window.addEventListener('resize', this.onWindowResize)
-    this.holdWidth()
+    this.width.attach()
     this.syncCwd()
     this.pollTimer = setInterval(() => this.syncCwd(), 2000)
   }
 
   ngOnDestroy(): void {
     clearInterval(this.pollTimer)
-    window.removeEventListener('resize', this.onWindowResize)
+    this.width.detach()
     super.ngOnDestroy()
-  }
-
-  /** Re-derives the ratio so the pinned px width holds through a container resize. */
-  private holdWidth(attempt = 0): void {
-    const parent = this.parent
-    if (!(parent instanceof SplitTabComponent)) {
-      return
-    }
-    // Mid-drag the user owns the width; correcting it here would fight the spanner.
-    if ((parent as any)._spannerResizing) {
-      return
-    }
-    const container: SplitContainer | null = parent.getParentOf(this as any)
-    const index = container?.children.indexOf(this as any) ?? -1
-    if (!container || index < 0 || container.ratios.length < 2) {
-      return
-    }
-    // On first insert the split area has no width yet; it lands a frame later.
-    const containerPx = this.containerPx(container)
-    if (!containerPx) {
-      if (attempt < 10) {
-        requestAnimationFrame(() => this.holdWidth(attempt + 1))
-      }
-      return
-    }
-
-    // A width configured as <= 1 is a legacy fraction; convert it to px once, then pin that.
-    if (this.pinnedPx <= 1) {
-      this.pinnedPx *= containerPx
-    }
-
-    // Already correct — skip: layout() rebuilds _spanners and their drag listeners.
-    if (Math.abs(container.ratios[index] * containerPx - this.pinnedPx) <= 1) {
-      return
-    }
-
-    const share = Math.min(Math.max(this.pinnedPx / containerPx, 0.05), 0.9)
-    const rest = container.ratios.reduce((sum, r, i) => i === index ? sum : sum + r, 0)
-    const siblings = container.ratios.length - 1
-    container.ratios = container.ratios.map((r, i) =>
-      i === index
-        ? share
-        : rest > 0 ? r / rest * (1 - share) : (1 - share) / siblings,
-    )
-    parent.layout()
   }
 
   refresh(): void {
@@ -635,7 +428,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     try {
       const runner = this.runnerFor(this.focusedSibling()?.session)
       this.transport = runner.remote ? `on ${runner.where}` : null
-      const sessions = await runAsbutler(runner, cwd)
+      const sessions = await listSessions(runner, cwd)
       if (generation !== this.generation) {
         return
       }
@@ -684,13 +477,7 @@ export class SessionListTabComponent extends BaseTabComponent {
   private runnerFor(session: any): Runner {
     const client = session?.ssh?.ssh
     if (client?.openSessionChannel && client?.activateChannel) {
-      const host = session.ssh.profile?.options?.host ?? 'the remote host'
-      // Bare name: agentSessions.binary is a path on *this* machine, meaningless there.
-      return {
-        remote: true,
-        where: host,
-        run: argv => runOverSsh(client, ['asbutler', ...argv], host),
-      }
+      return remoteRunner(client, session.ssh.profile?.options?.host ?? 'the remote host')
     }
     const bin = resolveBinary(this.bin)
     if (!bin) {
@@ -699,42 +486,7 @@ export class SessionListTabComponent extends BaseTabComponent {
         `and $PATH for '${this.bin}'. Set agentSessions.binary in config.yaml if it lives elsewhere.`,
       )
     }
-    return {
-      remote: false,
-      where: 'this machine',
-      run: argv => new Promise((resolve, reject) => {
-        execFile(bin, argv, { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
-          // rm exits non-zero but still prints why, so stdout wins when it parses.
-          stdout ? resolve(stdout) : reject(err ?? new Error('asbutler produced no output'))
-        })
-      }),
-    }
-  }
-
-  /**
-   * Measures the split area, never the pane: panes carry a 0.125s width transition.
-   * `container.w` is a percentage of that area, not px. See ADR-0001 D2.
-   */
-  private containerPx(container: SplitContainer): number {
-    const areaPx = (this.el.nativeElement as HTMLElement).parentElement?.clientWidth ?? 0
-    return areaPx * (container.w || 100) / 100
-  }
-
-  /** Take the width the drag settled on, read from the ratios rather than the animating DOM. */
-  private adoptWidth(): void {
-    const parent = this.parent
-    if (!(parent instanceof SplitTabComponent)) {
-      return
-    }
-    const container: SplitContainer | null = parent.getParentOf(this as any)
-    const index = container?.children.indexOf(this as any) ?? -1
-    if (!container || index < 0) {
-      return
-    }
-    const px = container.ratios[index] * this.containerPx(container)
-    if (px > 0) {
-      this.pinnedPx = px
-    }
+    return localRunner(bin)
   }
 
   /** cwd of the focused sibling pane; null for SSH/serial tabs, which have no local cwd. */
