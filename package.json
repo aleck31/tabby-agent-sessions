@@ -1,6 +1,6 @@
 {
   "name": "tabby-agent-sessions",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Tabby sidebar listing AI agent sessions for the focused terminal's working directory, backed by asbutler",
   "keywords": [
     "tabby-plugin"

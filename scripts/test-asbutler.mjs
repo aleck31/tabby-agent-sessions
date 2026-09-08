@@ -79,4 +79,25 @@ await check('removeSessions passes every id in one call', async () => {
   assert.deepStrictEqual(seen, ['rm', 'a', 'b'])
 })
 
+await check('renameSession passes id and title through', async () => {
+  let seen
+  await asb.renameSession({ remote: false, where: 'h', run: async a => { seen = a; return '{"id":"x","title":"t"}' } }, 'x', 't')
+  assert.deepStrictEqual(seen, ['rename', 'x', 't'])
+})
+
+// rename exits 0 on failure, so only the error field distinguishes success.
+await assert.rejects(
+  () => asb.renameSession(fake('{"id":"x","title":"t","error":"no session with id \\"x\\""}'), 'x', 't'),
+  /no session with id/)
+console.log('  ok  renameSession surfaces the error field despite exit 0')
+passed++
+
+await check('isPlaceholderTitle matches only the synthesised form', () => {
+  const id = 'e9545db7-0b50-4140-a359-c18981a51d5e'
+  assert.ok(asb.isPlaceholderTitle({ id, title: '(untitled · e9545db7)' }))
+  assert.ok(!asb.isPlaceholderTitle({ id, title: 'a real title' }))
+  // A different id's placeholder is somebody's real title as far as this session knows.
+  assert.ok(!asb.isPlaceholderTitle({ id, title: '(untitled · deadbeef)' }))
+})
+
 console.log(`\n${passed} passed`)

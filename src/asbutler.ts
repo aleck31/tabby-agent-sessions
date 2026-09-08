@@ -182,6 +182,28 @@ export async function listSessions(runner: Runner, cwd: string): Promise<AgentSe
   }
 }
 
+/**
+ * `rename` returns one object, not an array, and exits 0 even when it fails — the `error`
+ * field is the only signal. Writes the title into the agent's own metadata.
+ */
+export async function renameSession(runner: Runner, id: string, title: string): Promise<void> {
+  const stdout = await runner.run(['rename', id, title])
+  let result: { error?: string }
+  try {
+    result = JSON.parse(stdout)
+  } catch {
+    throw new Error(`asbutler rename on ${runner.where} returned non-JSON output`)
+  }
+  if (result.error) {
+    throw new Error(result.error)
+  }
+}
+
+/** asbutler synthesises this for a session with no title of its own; never commit it back. */
+export function isPlaceholderTitle(session: { id: string, title: string }): boolean {
+  return session.title === `(untitled · ${session.id.slice(0, 8)})`
+}
+
 export async function removeSessions(runner: Runner, ids: string[]): Promise<RemoveResult[]> {
   const stdout = await runner.run(['rm', ...ids])
   try {

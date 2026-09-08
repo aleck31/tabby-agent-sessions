@@ -14,7 +14,9 @@ import {
   listSessions,
   localRunner,
   remoteRunner,
+  isPlaceholderTitle,
   removeSessions as asbutlerRemove,
+  renameSession,
   resolveBinary,
 } from './asbutler'
 import { PaneWidth } from './paneWidth'
@@ -89,13 +91,25 @@ const RESUME_ARGV: Record<string, (id: string) => string[]> = {
           <span class="as-lock" *ngIf="s.locked" title="held by a running agent">🔒</span>
           <span class="as-size">{{ s.sizeHuman }}</span>
         </div>
+        <!-- stopPropagation on every handler: the row's click/dblclick must not fire while typing. -->
+        <input class="as-rename" *ngIf="editingId === s.id" #renameInput
+               [value]="editingTitle"
+               (click)="$event.stopPropagation()"
+               (dblclick)="$event.stopPropagation()"
+               (keydown.enter)="commitRename(s, renameInput.value)"
+               (keydown.escape)="cancelRename()"
+               (blur)="commitRename(s, renameInput.value)">
         <!-- Own tooltip: the title is ellipsised, so hovering it must still reveal the full text. -->
-        <div class="as-title" [title]="s.title">{{ s.title || '(untitled)' }}</div>
+        <div class="as-title" *ngIf="editingId !== s.id" [title]="s.title">
+          {{ s.title || '(untitled)' }}
+        </div>
         <div class="as-meta">{{ s.agent }} · {{ s.messageCount }} msgs</div>
         <!-- stopPropagation first: without it these also hit the row's select/resume handlers. -->
         <span class="as-actions">
           <button class="as-act" *ngIf="isResumable(s)" title="Resume this session"
                   (click)="$event.stopPropagation(); resume(s)">▶</button>
+          <button class="as-act" title="Rename this session"
+                  (click)="$event.stopPropagation(); startRename(s)">✎</button>
           <button class="as-act as-danger" title="Delete this session permanently"
                   (click)="$event.stopPropagation(); remove(s)">✕</button>
         </span>
@@ -150,6 +164,9 @@ const RESUME_ARGV: Record<string, (id: string) => string[]> = {
                  border-radius: 3px; padding: 0 3px; font-size: 10px; }
     .as-size { margin-left: auto; opacity: .6; }
     .as-title { margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .as-rename { margin: 2px 0; width: 100%; box-sizing: border-box; font: inherit;
+                 color: inherit; background: rgba(0, 0, 0, .25);
+                 border: 1px solid rgba(140, 180, 255, .7); border-radius: 3px; padding: 1px 3px; }
     .as-meta { opacity: .5; }
   `],
 })
@@ -164,6 +181,9 @@ export class SessionListTabComponent extends BaseTabComponent {
   transport: string | null = null
   readonly build = __PLUGIN_BUILD__
   selectedIds = new Set<string>()
+  /** Row currently being renamed inline, and the title it started from. */
+  editingId: string | null = null
+  editingTitle = ''
   error: string | null = null
   loading = false
 
@@ -255,6 +275,41 @@ export class SessionListTabComponent extends BaseTabComponent {
     if (this.agentFilter && !counts.has(this.agentFilter)) {
       this.agentFilter = null
       this.visible = this.sessions
+    }
+  }
+
+  /** Prefills empty for a placeholder title, so asbutler's synthesised text is never committed. */
+  startRename(s: AgentSession): void {
+    this.editingId = s.id
+    this.editingTitle = isPlaceholderTitle(s) ? '' : s.title
+    // Next tick: the input does not exist until Angular has rendered the *ngIf.
+    setTimeout(() => {
+      const input = this.el.nativeElement.querySelector('.as-rename') as HTMLInputElement | null
+      input?.focus()
+      input?.select()
+    })
+  }
+
+  cancelRename(): void {
+    this.editingId = null
+  }
+
+  async commitRename(s: AgentSession, raw: string): Promise<void> {
+    if (this.editingId !== s.id) {
+      return
+    }
+    this.editingId = null
+    const title = raw.trim()
+    if (!title || title === this.editingTitle) {
+      return
+    }
+    try {
+      const runner = this.runnerFor(this.focusedSibling()?.session)
+      await renameSession(runner, s.id, title)
+      // Patch in place rather than re-querying; a directory scan costs a subprocess.
+      s.title = title
+    } catch (e: any) {
+      this.notifications.error(`Rename failed: ${e.message ?? String(e)}`)
     }
   }
 
