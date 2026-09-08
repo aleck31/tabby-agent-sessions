@@ -28,13 +28,16 @@ declare const __PLUGIN_BUILD__: string
 /**
  * Keyed on asbutler's `agent` string. Absent agent = no resume, rather than a guessed
  * command that would launch the wrong thing; asbutler itself has no resume subcommand.
- * Kiro takes --session-source because the same id can exist in both its stores.
+ *
+ * `--agent-engine v1` only for a v1 row whose id also exists in v2, where a bare resume
+ * would not reach it. Never for v2: it is the default, and passing it explicitly is not a
+ * no-op. Not `--session-source` either, which only accompanies --delete-session.
  */
-const RESUME_ARGV: Record<string, (s: AgentSession) => string[]> = {
+const RESUME_ARGV: Record<string, (s: AgentSession, shared: boolean) => string[]> = {
   'Claude Code': s => ['claude', '--resume', s.id],
-  Kiro: s => [
+  Kiro: (s, shared) => [
     'kiro-cli', 'chat', '--resume-id', s.id,
-    ...(s.store ? ['--session-source', s.store] : []),
+    ...(shared && s.store === 'v1' ? ['--agent-engine', 'v1'] : []),
   ],
 }
 
@@ -239,6 +242,11 @@ export class SessionListTabComponent extends BaseTabComponent {
     return rowKey(s)
   }
 
+  /** Same id in more than one store; only then does a bare --resume-id need disambiguating. */
+  private sharesIdAcrossStores(s: AgentSession): boolean {
+    return this.sessions.filter(x => x.id === s.id).length > 1
+  }
+
   /** v1 stores no title of its own — Kiro derives it from the first prompt — so asbutler refuses. */
   isRenamable(s: AgentSession): boolean {
     return s.store !== 'v1'
@@ -434,7 +442,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     if (!build || !/^[A-Za-z0-9._-]+$/.test(s.id)) {
       return null
     }
-    return build(s).join(' ')
+    return build(s, this.sharesIdAcrossStores(s)).join(' ')
   }
 
   private get bin(): string {

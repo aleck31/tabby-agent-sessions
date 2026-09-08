@@ -163,13 +163,27 @@ export function runOverSsh(
   })
 }
 
+/**
+ * Resolving asbutler's own path is not enough: it execs agent CLIs itself (deleting a Kiro
+ * v1 session shells out to `kiro-cli`), and those inherit Tabby's launchd PATH. ADR-0002 D4.
+ */
+export function childPath(): string {
+  const inherited = (process.env.PATH ?? '').split(':').filter(Boolean)
+  // Dedupe the whole list: an inherited PATH commonly repeats entries.
+  return [...new Set([...SEARCH_DIRS, ...inherited])].join(':')
+}
+
 /** Local runner; `rm` exits non-zero but still prints why, so stdout wins when present. */
 export function localRunner(bin: string): Runner {
   return {
     remote: false,
     where: 'this machine',
     run: argv => new Promise((resolve, reject) => {
-      execFile(bin, argv, { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
+      const options = {
+        maxBuffer: 32 * 1024 * 1024,
+        env: { ...process.env, PATH: childPath() },
+      }
+      execFile(bin, argv, options, (err, stdout) => {
         stdout ? resolve(stdout) : reject(err ?? new Error('asbutler produced no output'))
       })
     }),

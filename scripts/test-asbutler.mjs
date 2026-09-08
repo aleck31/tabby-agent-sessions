@@ -119,4 +119,12 @@ await check('isPlaceholderTitle matches only the synthesised form', () => {
   assert.ok(!asb.isPlaceholderTitle({ id, title: '(untitled · deadbeef)' }))
 })
 
+await check('childPath puts the search dirs ahead of the inherited PATH', () => {
+  const p = asb.childPath().split(':')
+  // asbutler execs kiro-cli itself, and Tabby's launchd PATH does not contain it.
+  assert.ok(p.some(d => d.endsWith('/.local/bin')), asb.childPath())
+  assert.ok(p.indexOf('/usr/bin') > 0, 'search dirs must come first')
+  assert.strictEqual(new Set(p).size, p.length, 'no duplicate entries')
+})
+
 console.log(`\n${passed} passed`)
