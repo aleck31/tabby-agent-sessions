@@ -45,6 +45,9 @@ function resolveBinary(configured: string): string | null {
   return null
 }
 
+/** Injected by webpack's DefinePlugin; tells you which bundle Tabby actually loaded. */
+declare const __PLUGIN_BUILD__: string
+
 /** Single source for the default; index.ts feeds it to the ConfigProvider. */
 export const DEFAULT_PANE_WIDTH_PX = 360
 
@@ -86,19 +89,89 @@ export interface AgentSession {
 /**
  * asbutler owns session parsing; `--path` must narrow before it enriches. ADR-0002 D1/D2.
  */
-function runAsbutler(bin: string, cwd: string): Promise<AgentSession[]> {
-  return new Promise((resolve, reject) => {
-    execFile(bin, ['list', '--path', cwd], { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
-      if (err) {
-        reject(err)
+async function runAsbutler(runner: Runner, cwd: string): Promise<AgentSession[]> {
+  const stdout = await runner.run(['list', '--path', cwd])
+  try {
+    return JSON.parse(stdout).sessions ?? []
+  } catch {
+    throw new Error(
+      `asbutler on ${runner.where} returned non-JSON output — needs asbutler >= 0.6.1`,
+    )
+  }
+}
+
+/** Runs asbutler wherever the terminal actually is — this machine, or the host it is on. */
+interface Runner {
+  remote: boolean
+  where: string
+  run(argv: string[]): Promise<string>
+}
+
+function quoteArgv(argv: string[]): string {
+  return argv.map(a => `'${a.replace(/'/g, `'\\''`)}'`).join(' ')
+}
+
+const MISSING_MARKER = '__asbutler_missing__'
+
+/**
+ * Presence is proved in stdout, not guessed from stderr: russh exposes no exit status,
+ * and stderr wording is shell- and locale-dependent. `if` rather than `||`, so asbutler's
+ * own non-zero exits are not mistaken for it being absent.
+ */
+function remoteCommand(argv: string[]): string {
+  return `if command -v asbutler >/dev/null 2>&1; then ${quoteArgv(argv)}; ` +
+    `else echo ${MISSING_MARKER}; fi`
+}
+
+/**
+ * Execs over Tabby's already-authenticated russh connection, so there is no second
+ * login and no key prompt. Reads until eof/close, since exec has no other end marker.
+ */
+function runOverSsh(client: any, argv: string[], where: string, timeoutMs = 10000): Promise<string> {
+  return new Promise(async (resolve, reject) => {
+    const out: Buffer[] = []
+    const err: Buffer[] = []
+    let channel: any
+    let done = false
+
+    const finish = (failure?: Error) => {
+      if (done) {
         return
       }
-      try {
-        resolve(JSON.parse(stdout).sessions ?? [])
-      } catch {
-        reject(new Error('asbutler returned non-JSON output — needs asbutler >= 0.6.1'))
+      done = true
+      clearTimeout(timer)
+      channel?.close?.()?.catch?.(() => {})
+      if (failure) {
+        reject(failure)
+        return
       }
-    })
+      const stdout = Buffer.concat(out).toString('utf8')
+      const stderr = Buffer.concat(err).toString('utf8')
+      if (stdout.includes(MISSING_MARKER) || /not found|No such file/i.test(stderr)) {
+        reject(new Error(`asbutler is not installed on ${where}`))
+        return
+      }
+      stdout.trim()
+        ? resolve(stdout)
+        : reject(new Error(stderr.trim() || `asbutler on ${where} produced no output`))
+    }
+
+    // Armed before opening the channel: a hang in activation left this pending forever.
+    const timer = setTimeout(
+      () => finish(new Error(`asbutler on ${where} did not respond within ${timeoutMs / 1000}s`)),
+      timeoutMs,
+    )
+
+    try {
+      channel = await client.activateChannel(await client.openSessionChannel())
+      channel.data$?.subscribe((d: any) => out.push(Buffer.from(d)))
+      channel.extendedData$?.subscribe((d: any) => err.push(Buffer.from(d?.data ?? d)))
+      channel.eof$?.subscribe(() => finish())
+      channel.closed$?.subscribe(() => finish())
+      await channel.requestExec(remoteCommand(argv))
+    } catch (e: any) {
+      finish(e instanceof Error ? e : new Error(String(e)))
+    }
   })
 }
 
@@ -112,16 +185,13 @@ interface RemoveResult {
  * `rm` exits non-zero on failure but still prints the reason as JSON, so stdout is
  * parsed regardless of the exit code — the exec error alone loses the actual cause.
  */
-function runAsbutlerRm(bin: string, ids: string[]): Promise<RemoveResult[]> {
-  return new Promise((resolve, reject) => {
-    execFile(bin, ['rm', ...ids], { maxBuffer: 1024 * 1024 }, (err, stdout) => {
-      try {
-        resolve(JSON.parse(stdout))
-      } catch {
-        reject(err ?? new Error('asbutler rm returned non-JSON output'))
-      }
-    })
-  })
+async function runAsbutlerRm(runner: Runner, ids: string[]): Promise<RemoveResult[]> {
+  const stdout = await runner.run(['rm', ...ids])
+  try {
+    return JSON.parse(stdout)
+  } catch {
+    throw new Error(`asbutler rm on ${runner.where} returned non-JSON output`)
+  }
 }
 
 @Component({
@@ -131,14 +201,26 @@ function runAsbutlerRm(bin: string, ids: string[]): Promise<RemoveResult[]> {
     <div class="as-panel">
       <div class="as-head">
         <strong>Agent Sessions</strong>
+        <!-- Names the host when remote, so a wrong target or silent failure stays visible. -->
+        <span class="as-where" *ngIf="transport">{{ transport }}</span>
         <button class="btn btn-link btn-sm" (click)="refresh()" [disabled]="loading"
-                [title]="loading ? 'Loading…' : 'Refresh'">
+                [title]="(loading ? 'Loading…' : 'Refresh') + ' · build ' + build">
           <span class="as-spin" *ngIf="loading"></span>
           <span *ngIf="!loading">↻</span>
         </button>
       </div>
-      <div class="as-cwd" [title]="cwd || ''">{{ cwd || 'no local directory' }}</div>
+      <div class="as-cwd" [title]="cwd || ''">{{ cwd || 'no working directory' }}</div>
       <div class="as-err" *ngIf="error">{{ error }}</div>
+      <div class="as-hint" *ngIf="error?.includes('not installed')">
+        Get it from
+        <a class="as-link" href="https://github.com/aleck31/agent-session-butler/releases"
+           (click)="openReleases($event)">the asbutler releases page</a>
+      </div>
+      <!-- Outside as-body, or the stale dimming makes these near-invisible on a first load. -->
+      <div class="as-empty" *ngIf="loading && sessions.length === 0">Querying asbutler…</div>
+      <div class="as-empty" *ngIf="!error && !loading && visible.length === 0">
+        {{ emptyMessage }}
+      </div>
 
       <!-- Dimmed and inert while these rows belong to a directory we have already left. -->
       <div class="as-body" [class.as-stale]="stale">
@@ -157,10 +239,6 @@ function runAsbutlerRm(bin: string, ids: string[]): Promise<RemoveResult[]> {
         <button class="as-act as-danger" (click)="removeSelected()">Delete</button>
       </div>
 
-      <!-- No cwd and no sessions are different answers; say which one this is. -->
-      <div class="as-empty" *ngIf="!error && !loading && visible.length === 0">
-        {{ emptyMessage }}
-      </div>
       <div class="as-row" *ngFor="let s of visible"
            [class.as-selected]="selectedIds.has(s.id)"
            [title]="rowHint(s)"
@@ -195,8 +273,11 @@ function runAsbutlerRm(bin: string, ids: string[]): Promise<RemoveResult[]> {
     .as-panel { height: 100%; box-sizing: border-box; overflow-y: auto; overflow-x: hidden;
                 padding: 8px; font-size: 12px; }
     .as-head { display: flex; justify-content: space-between; align-items: center; }
+    .as-where { opacity: .45; margin-right: auto; margin-left: 6px; }
     .as-cwd { opacity: .6; word-break: break-all; margin: 4px 0 8px; font-family: monospace; }
-    .as-err { color: #e57373; margin-bottom: 8px; }
+    .as-err { color: #e57373; margin-bottom: 4px; white-space: pre-wrap; }
+    .as-hint { opacity: .7; margin-bottom: 8px; }
+    .as-link { color: #8cb4ff; text-decoration: underline; cursor: pointer; }
     .as-empty { opacity: .5; font-style: italic; }
     /* Inert as well as dim: acting on a stale row would hit the directory we just left. */
     .as-stale { opacity: .4; pointer-events: none; }
@@ -242,6 +323,9 @@ export class SessionListTabComponent extends BaseTabComponent {
   visible: AgentSession[] = []
   agentCounts: { agent: string, count: number }[] = []
   agentFilter: string | null = null
+  /** Which machine asbutler ran on, shown so a wrong host or a hang is never silent. */
+  transport: string | null = null
+  readonly build = __PLUGIN_BUILD__
   selectedIds = new Set<string>()
   error: string | null = null
   loading = false
@@ -367,11 +451,9 @@ export class SessionListTabComponent extends BaseTabComponent {
     }
 
     try {
-      const bin = resolveBinary(this.bin)
-      if (!bin) {
-        throw new Error(`'${this.bin}' not found`)
-      }
-      const results = await runAsbutlerRm(bin, doomed.map(s => s.id))
+      // Same transport as the listing, or a remote row's delete would run here instead.
+      const runner = this.runnerFor(this.focusedSibling()?.session)
+      const results = await runAsbutlerRm(runner, doomed.map(s => s.id))
       const gone = new Set(results.filter(r => r.deleted).map(r => r.id))
       this.sessions = this.sessions.filter(s => !gone.has(s.id))
       gone.forEach(id => this.selectedIds.delete(id))
@@ -443,10 +525,16 @@ export class SessionListTabComponent extends BaseTabComponent {
   }
 
   /** Kept out of the template: prose with apostrophes needs double escaping through the TS literal. */
+  /** preventDefault, or Electron navigates the app window away from Tabby itself. */
+  openReleases(event: Event): void {
+    event.preventDefault()
+    this.platform.openExternal('https://github.com/aleck31/agent-session-butler/releases')
+  }
+
   get emptyMessage(): string {
     return this.cwd
       ? 'No sessions for this directory'
-      : "This tab has no local directory — remote shells aren't grouped by cwd"
+      : 'This terminal reports no working directory'
   }
 
   ngOnInit(): void {
@@ -537,6 +625,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     if (!cwd) {
       this.sessions = []
       this.sessionsCwd = cwd
+      this.transport = null
       this.applyFilter()
       this.loading = false
       return
@@ -544,14 +633,9 @@ export class SessionListTabComponent extends BaseTabComponent {
 
     this.loading = true
     try {
-      const bin = resolveBinary(this.bin)
-      if (!bin) {
-        throw new Error(
-          `'${this.bin}' not found in ${SEARCH_DIRS.join(', ')} or $PATH — ` +
-          `set agentSessions.binary in config.yaml`,
-        )
-      }
-      const sessions = await runAsbutler(bin, cwd)
+      const runner = this.runnerFor(this.focusedSibling()?.session)
+      this.transport = runner.remote ? `on ${runner.where}` : null
+      const sessions = await runAsbutler(runner, cwd)
       if (generation !== this.generation) {
         return
       }
@@ -586,10 +670,45 @@ export class SessionListTabComponent extends BaseTabComponent {
       : parent.getAllTabs().filter(t => t !== (this as any))
   }
 
-  /** The local terminal this list is tracking, and where a resume gets typed. */
+  /** The terminal this list is tracking, and where a resume gets typed. */
   private focusedSibling(): any {
     return this.siblingCandidates()
       .find(t => t.session?.supportsWorkingDirectory?.()) ?? null
+  }
+
+  /**
+   * asbutler must run where the sessions are. An SSH shell holds its SSHSession on
+   * `.ssh`, whose `.ssh` is the live russh client — duck-typed, since the class name
+   * does not survive minification.
+   */
+  private runnerFor(session: any): Runner {
+    const client = session?.ssh?.ssh
+    if (client?.openSessionChannel && client?.activateChannel) {
+      const host = session.ssh.profile?.options?.host ?? 'the remote host'
+      // Bare name: agentSessions.binary is a path on *this* machine, meaningless there.
+      return {
+        remote: true,
+        where: host,
+        run: argv => runOverSsh(client, ['asbutler', ...argv], host),
+      }
+    }
+    const bin = resolveBinary(this.bin)
+    if (!bin) {
+      throw new Error(
+        `asbutler is not installed on this machine.\nLooked in ${SEARCH_DIRS.join(', ')} ` +
+        `and $PATH for '${this.bin}'. Set agentSessions.binary in config.yaml if it lives elsewhere.`,
+      )
+    }
+    return {
+      remote: false,
+      where: 'this machine',
+      run: argv => new Promise((resolve, reject) => {
+        execFile(bin, argv, { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
+          // rm exits non-zero but still prints why, so stdout wins when it parses.
+          stdout ? resolve(stdout) : reject(err ?? new Error('asbutler produced no output'))
+        })
+      }),
+    }
   }
 
   /**
