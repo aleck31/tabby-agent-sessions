@@ -39,6 +39,8 @@ export function resolveBinary(configured: string): string | null {
 
 export interface AgentSession {
   id: string
+  /** `v1`/`v2` for Kiro, empty for single-store agents. Kiro reuses ids across stores. */
+  store: string
   agent: string
   cwd: string
   profile: string
@@ -62,6 +64,19 @@ export interface Runner {
   remote: boolean
   where: string
   run(argv: string[]): Promise<string>
+}
+
+/**
+ * Rows are identified by id **and** store: opening a Kiro v1 session copies it into v2
+ * under the same id, so an id alone can name two different sessions.
+ */
+export function rowKey(s: { id: string, store: string }): string {
+  return s.store ? `${s.id}:${s.store}` : s.id
+}
+
+/** asbutler refuses an ambiguous id rather than guessing, so pass the store when we have one. */
+export function storeArgs(s: { store: string }): string[] {
+  return s.store ? ['--store', s.store] : []
 }
 
 export function quoteArgv(argv: string[]): string {
@@ -177,7 +192,7 @@ export async function listSessions(runner: Runner, cwd: string): Promise<AgentSe
     return JSON.parse(stdout).sessions ?? []
   } catch {
     throw new Error(
-      `asbutler on ${runner.where} returned non-JSON output — needs asbutler >= 0.6.1`,
+      `asbutler on ${runner.where} returned non-JSON output — needs asbutler >= 0.8.1`,
     )
   }
 }
@@ -186,8 +201,12 @@ export async function listSessions(runner: Runner, cwd: string): Promise<AgentSe
  * `rename` returns one object, not an array, and exits 0 even when it fails — the `error`
  * field is the only signal. Writes the title into the agent's own metadata.
  */
-export async function renameSession(runner: Runner, id: string, title: string): Promise<void> {
-  const stdout = await runner.run(['rename', id, title])
+export async function renameSession(
+  runner: Runner,
+  s: { id: string, store: string },
+  title: string,
+): Promise<void> {
+  const stdout = await runner.run(['rename', s.id, title, ...storeArgs(s)])
   let result: { error?: string }
   try {
     result = JSON.parse(stdout)
@@ -204,8 +223,31 @@ export function isPlaceholderTitle(session: { id: string, title: string }): bool
   return session.title === `(untitled · ${session.id.slice(0, 8)})`
 }
 
-export async function removeSessions(runner: Runner, ids: string[]): Promise<RemoveResult[]> {
-  const stdout = await runner.run(['rm', ...ids])
+/**
+ * One call per store, because `--store` applies to the whole invocation. Ids without a
+ * store go together; asbutler errors on an ambiguous id rather than deleting a coin flip.
+ */
+export async function removeSessions(
+  runner: Runner,
+  targets: { id: string, store: string }[],
+): Promise<RemoveResult[]> {
+  const byStore = new Map<string, string[]>()
+  for (const t of targets) {
+    byStore.set(t.store, [...(byStore.get(t.store) ?? []), t.id])
+  }
+  const results: RemoveResult[] = []
+  for (const [store, ids] of byStore) {
+    results.push(...await removeOneStore(runner, ids, store))
+  }
+  return results
+}
+
+async function removeOneStore(
+  runner: Runner,
+  ids: string[],
+  store: string,
+): Promise<RemoveResult[]> {
+  const stdout = await runner.run(['rm', ...ids, ...storeArgs({ store })])
   try {
     return JSON.parse(stdout)
   } catch {

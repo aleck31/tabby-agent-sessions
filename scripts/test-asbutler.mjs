@@ -75,19 +75,38 @@ passed++
 
 await check('removeSessions passes every id in one call', async () => {
   let seen
-  await asb.removeSessions({ remote: false, where: 'h', run: async a => { seen = a; return '[]' } }, ['a', 'b'])
+  await asb.removeSessions({ remote: false, where: 'h', run: async a => { seen = a; return '[]' } },
+    [{ id: 'a', store: '' }, { id: 'b', store: '' }])
   assert.deepStrictEqual(seen, ['rm', 'a', 'b'])
 })
 
-await check('renameSession passes id and title through', async () => {
+await check('renameSession passes the store so an ambiguous id is not guessed', async () => {
   let seen
-  await asb.renameSession({ remote: false, where: 'h', run: async a => { seen = a; return '{"id":"x","title":"t"}' } }, 'x', 't')
-  assert.deepStrictEqual(seen, ['rename', 'x', 't'])
+  const runner = { remote: false, where: 'h', run: async a => { seen = a; return '{"id":"x","title":"t"}' } }
+  await asb.renameSession(runner, { id: 'x', store: 'v2' }, 't')
+  assert.deepStrictEqual(seen, ['rename', 'x', 't', '--store', 'v2'])
+  await asb.renameSession(runner, { id: 'x', store: '' }, 't')
+  assert.deepStrictEqual(seen, ['rename', 'x', 't'], 'single-store agents send no --store')
+})
+
+await check('rowKey separates the same id in different stores', () => {
+  assert.notStrictEqual(asb.rowKey({ id: 'x', store: 'v1' }), asb.rowKey({ id: 'x', store: 'v2' }))
+  assert.strictEqual(asb.rowKey({ id: 'x', store: '' }), 'x')
+})
+
+await check('removeSessions groups one call per store', async () => {
+  const calls = []
+  const runner = { remote: false, where: 'h', run: async a => { calls.push(a); return '[]' } }
+  await asb.removeSessions(runner, [
+    { id: 'a', store: 'v2' }, { id: 'b', store: 'v1' }, { id: 'c', store: 'v2' },
+  ])
+  // --store applies to the whole invocation, so mixed stores cannot share one call.
+  assert.deepStrictEqual(calls, [['rm', 'a', 'c', '--store', 'v2'], ['rm', 'b', '--store', 'v1']])
 })
 
 // rename exits 0 on failure, so only the error field distinguishes success.
 await assert.rejects(
-  () => asb.renameSession(fake('{"id":"x","title":"t","error":"no session with id \\"x\\""}'), 'x', 't'),
+  () => asb.renameSession(fake('{"id":"x","title":"t","error":"no session with id \\"x\\""}'), { id: 'x', store: '' }, 't'),
   /no session with id/)
 console.log('  ok  renameSession surfaces the error field despite exit 0')
 passed++

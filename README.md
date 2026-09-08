@@ -15,12 +15,13 @@ Tabby has no sidebar extension point (verified against `builtin-plugins/*/typing
 - the hover `✎` renames a session via `asbutler rename`, editing the title in place — Enter commits, Escape cancels. Untitled sessions start from an empty box rather than asbutler's `(untitled · …)` placeholder
 - the hover `✕` deletes via `asbutler rm`, behind a native confirm dialog that defaults to Cancel. **Permanent** — asbutler unlinks the file and the JSON exposes no path for the plugin to trash it instead
 - cmd/ctrl-click toggles rows and shift-click extends a range; with two or more selected, a Delete bar removes them in one `asbutler rm` call, skipping any held by a running agent
+- Kiro keeps some sessions in two stores under the same id (opening a `v1` session copies it to `v2`), so rows are badged `v1` and keyed by id *and* store. Resume passes `--session-source`, and delete/rename pass `--store`, since asbutler refuses an ambiguous id rather than picking one
 - agent chips filter the rows already fetched, so switching filters costs nothing; sessions whose directory no longer exists are badged `orphan`
 - while a directory switch is in flight the previous rows are dimmed and inert, so an action can't land on the directory you just left
 
 ## Requirements
 
-`asbutler` **>= 0.6.1** ([releases](https://github.com/aleck31/agent-session-butler/releases)), installed on whichever machine the terminal is on — this one for local shells, the remote host for SSH. Querying one directory matters: `--path` narrows before asbutler enriches, so one directory costs ~0.8s where machine-wide costs ~36s.
+`asbutler` **>= 0.8.1** ([releases](https://github.com/aleck31/agent-session-butler/releases)), installed on whichever machine the terminal is on — this one for local shells, the remote host for SSH. Querying one directory matters: `--path` narrows before asbutler enriches, so one directory costs ~0.8s where machine-wide costs ~36s.
 
 The binary is resolved by searching `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, then `$PATH` — a GUI-launched Electron app only inherits `/usr/bin:/bin:/usr/sbin:/sbin` from launchd, so `$PATH` alone doesn't find `~/.local/bin`. Override if it lives elsewhere:
 

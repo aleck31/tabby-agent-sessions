@@ -15,6 +15,7 @@ import {
   localRunner,
   remoteRunner,
   isPlaceholderTitle,
+  rowKey,
   removeSessions as asbutlerRemove,
   renameSession,
   resolveBinary,
@@ -27,10 +28,14 @@ declare const __PLUGIN_BUILD__: string
 /**
  * Keyed on asbutler's `agent` string. Absent agent = no resume, rather than a guessed
  * command that would launch the wrong thing; asbutler itself has no resume subcommand.
+ * Kiro takes --session-source because the same id can exist in both its stores.
  */
-const RESUME_ARGV: Record<string, (id: string) => string[]> = {
-  'Claude Code': id => ['claude', '--resume', id],
-  Kiro: id => ['kiro-cli', 'chat', '--resume-id', id],
+const RESUME_ARGV: Record<string, (s: AgentSession) => string[]> = {
+  'Claude Code': s => ['claude', '--resume', s.id],
+  Kiro: s => [
+    'kiro-cli', 'chat', '--resume-id', s.id,
+    ...(s.store ? ['--session-source', s.store] : []),
+  ],
 }
 
 @Component({
@@ -79,7 +84,7 @@ const RESUME_ARGV: Record<string, (id: string) => string[]> = {
       </div>
 
       <div class="as-row" *ngFor="let s of visible"
-           [class.as-selected]="selectedIds.has(s.id)"
+           [class.as-selected]="selectedIds.has(key(s))"
            [title]="rowHint(s)"
            (click)="onRowClick(s, $event)"
            (dblclick)="resume(s)">
@@ -88,11 +93,13 @@ const RESUME_ARGV: Record<string, (id: string) => string[]> = {
           <span class="as-id">{{ s.id.slice(0, 8) }}</span>
           <span class="as-orphan" *ngIf="s.orphan"
                 title="This session's directory no longer exists">orphan</span>
+          <span class="as-store" *ngIf="s.store === 'v1'"
+                title="Kiro's deprecated v1 store — read-only; opening it copies to v2">v1</span>
           <span class="as-lock" *ngIf="s.locked" title="held by a running agent">🔒</span>
           <span class="as-size">{{ s.sizeHuman }}</span>
         </div>
         <!-- stopPropagation on every handler: the row's click/dblclick must not fire while typing. -->
-        <input class="as-rename" *ngIf="editingId === s.id" #renameInput
+        <input class="as-rename" *ngIf="editingId === key(s)" #renameInput
                [value]="editingTitle"
                (click)="$event.stopPropagation()"
                (dblclick)="$event.stopPropagation()"
@@ -100,7 +107,7 @@ const RESUME_ARGV: Record<string, (id: string) => string[]> = {
                (keydown.escape)="cancelRename()"
                (blur)="commitRename(s, renameInput.value)">
         <!-- Own tooltip: the title is ellipsised, so hovering it must still reveal the full text. -->
-        <div class="as-title" *ngIf="editingId !== s.id" [title]="s.title">
+        <div class="as-title" *ngIf="editingId !== key(s)" [title]="s.title">
           {{ s.title || '(untitled)' }}
         </div>
         <div class="as-meta">{{ s.agent }} · {{ s.messageCount }} msgs</div>
@@ -108,7 +115,7 @@ const RESUME_ARGV: Record<string, (id: string) => string[]> = {
         <span class="as-actions">
           <button class="as-act" *ngIf="isResumable(s)" title="Resume this session"
                   (click)="$event.stopPropagation(); resume(s)">▶</button>
-          <button class="as-act" title="Rename this session"
+          <button class="as-act" *ngIf="isRenamable(s)" title="Rename this session"
                   (click)="$event.stopPropagation(); startRename(s)">✎</button>
           <button class="as-act as-danger" title="Delete this session permanently"
                   (click)="$event.stopPropagation(); remove(s)">✕</button>
@@ -160,6 +167,8 @@ const RESUME_ARGV: Record<string, (id: string) => string[]> = {
     .as-when { font-weight: 600; font-variant-numeric: tabular-nums; }
     .as-id { opacity: .45; font-family: monospace; }
     /* Amber, not red: an orphan is stale, not broken, and red is the delete affordance. */
+    .as-store { color: #b39ddb; border: 1px solid rgba(179, 157, 219, .5);
+                border-radius: 3px; padding: 0 3px; font-size: 10px; }
     .as-orphan { color: #e0a33e; border: 1px solid rgba(224, 163, 62, .5);
                  border-radius: 3px; padding: 0 3px; font-size: 10px; }
     .as-size { margin-left: auto; opacity: .6; }
@@ -225,6 +234,16 @@ export class SessionListTabComponent extends BaseTabComponent {
       : `No resume command known for ${s.agent}`
   }
 
+  /** Rows are keyed by id *and* store: Kiro reuses ids across its v1 and v2 stores. */
+  key(s: AgentSession): string {
+    return rowKey(s)
+  }
+
+  /** v1 stores no title of its own — Kiro derives it from the first prompt — so asbutler refuses. */
+  isRenamable(s: AgentSession): boolean {
+    return s.store !== 'v1'
+  }
+
   /** Rows on screen belong to a directory we have already left, so they must not be acted on. */
   get stale(): boolean {
     return this.cwd !== this.sessionsCwd
@@ -233,20 +252,21 @@ export class SessionListTabComponent extends BaseTabComponent {
   /** Plain click replaces the selection; cmd/ctrl toggles one; shift extends from the anchor. */
   onRowClick(s: AgentSession, event: MouseEvent): void {
     if (event.shiftKey && this.anchorId) {
-      const from = this.visible.findIndex(x => x.id === this.anchorId)
-      const to = this.visible.findIndex(x => x.id === s.id)
+      const from = this.visible.findIndex(x => this.key(x) === this.anchorId)
+      const to = this.visible.findIndex(x => this.key(x) === this.key(s))
       if (from >= 0 && to >= 0) {
         const [lo, hi] = from <= to ? [from, to] : [to, from]
-        this.selectedIds = new Set(this.visible.slice(lo, hi + 1).map(x => x.id))
+        this.selectedIds = new Set(this.visible.slice(lo, hi + 1).map(x => this.key(x)))
         return
       }
     }
     if (event.metaKey || event.ctrlKey) {
-      this.selectedIds.has(s.id) ? this.selectedIds.delete(s.id) : this.selectedIds.add(s.id)
+      const k = this.key(s)
+      this.selectedIds.has(k) ? this.selectedIds.delete(k) : this.selectedIds.add(k)
     } else {
-      this.selectedIds = new Set([s.id])
+      this.selectedIds = new Set([this.key(s)])
     }
-    this.anchorId = s.id
+    this.anchorId = this.key(s)
   }
 
   clearSelection(): void {
@@ -280,7 +300,7 @@ export class SessionListTabComponent extends BaseTabComponent {
 
   /** Prefills empty for a placeholder title, so asbutler's synthesised text is never committed. */
   startRename(s: AgentSession): void {
-    this.editingId = s.id
+    this.editingId = this.key(s)
     this.editingTitle = isPlaceholderTitle(s) ? '' : s.title
     // Next tick: the input does not exist until Angular has rendered the *ngIf.
     setTimeout(() => {
@@ -295,7 +315,7 @@ export class SessionListTabComponent extends BaseTabComponent {
   }
 
   async commitRename(s: AgentSession, raw: string): Promise<void> {
-    if (this.editingId !== s.id) {
+    if (this.editingId !== this.key(s)) {
       return
     }
     this.editingId = null
@@ -305,7 +325,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     }
     try {
       const runner = this.runnerFor(this.focusedSibling()?.session)
-      await renameSession(runner, s.id, title)
+      await renameSession(runner, s, title)
       // Patch in place rather than re-querying; a directory scan costs a subprocess.
       s.title = title
     } catch (e: any) {
@@ -318,7 +338,7 @@ export class SessionListTabComponent extends BaseTabComponent {
   }
 
   removeSelected(): Promise<void> {
-    return this.removeSessions(this.sessions.filter(s => this.selectedIds.has(s.id)))
+    return this.removeSessions(this.sessions.filter(s => this.selectedIds.has(this.key(s))))
   }
 
   /** Permanent: asbutler unlinks the file, and the JSON exposes no path for us to trash instead. */
@@ -348,10 +368,12 @@ export class SessionListTabComponent extends BaseTabComponent {
     try {
       // Same transport as the listing, or a remote row's delete would run here instead.
       const runner = this.runnerFor(this.focusedSibling()?.session)
-      const results = await asbutlerRemove(runner, doomed.map(s => s.id))
+      const results = await asbutlerRemove(runner, doomed)
+      // Match on id: asbutler's result rows carry the id, and the store came from our call.
       const gone = new Set(results.filter(r => r.deleted).map(r => r.id))
-      this.sessions = this.sessions.filter(s => !gone.has(s.id))
-      gone.forEach(id => this.selectedIds.delete(id))
+      const removed = this.sessions.filter(s => gone.has(s.id) && doomed.includes(s))
+      this.sessions = this.sessions.filter(s => !removed.includes(s))
+      removed.forEach(s => this.selectedIds.delete(this.key(s)))
       this.applyFilter()
 
       const failed = results.filter(r => !r.deleted)
@@ -412,7 +434,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     if (!build || !/^[A-Za-z0-9._-]+$/.test(s.id)) {
       return null
     }
-    return build(s.id).join(' ')
+    return build(s).join(' ')
   }
 
   private get bin(): string {
