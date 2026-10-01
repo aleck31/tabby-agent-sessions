@@ -171,4 +171,57 @@ await check('resumeLine quotes anything a shell would reinterpret', () => {
   assert.deepStrictEqual(out, nasty.slice(1))
 })
 
+const refusal = 'id matches more than one session: "x" names 2 different conversations in the v1 store (/a, /b), and Kiro deletes by id — they can only go together; pass --all-with-id to confirm'
+
+await check('removeSessions appends --all-with-id only when asked', async () => {
+  const calls = []
+  const runner = { remote: false, where: 'h', run: async a => { calls.push(a); return '[]' } }
+  await asb.removeSessions(runner, [{ id: 'x', store: 'v1' }])
+  await asb.removeSessions(runner, [{ id: 'x', store: 'v1' }], true)
+  assert.deepStrictEqual(calls, [['rm', 'x', '--store', 'v1'], ['rm', 'x', '--store', 'v1', '--all-with-id']])
+})
+
+await check('the refusal is recognised as a JSON result', async () => {
+  const r = await asb.removeSessions(fake(JSON.stringify([{ id: 'x', deleted: false, error: refusal }])), [{ id: 'x', store: 'v1' }])
+  assert.ok(asb.needsAllWithId(r[0].error))
+})
+
+await check('the refusal is recognised as a failed run, other failures still throw', async () => {
+  const failing = msg => ({ remote: false, where: 'h', run: async () => { throw new Error(msg) } })
+  const r = await asb.removeSessions(failing(refusal), [{ id: 'x', store: 'v1' }, { id: 'y', store: 'v1' }])
+  assert.deepStrictEqual(r.map(x => [x.id, x.deleted, asb.needsAllWithId(x.error)]), [['x', false, true], ['y', false, true]])
+  await assert.rejects(() => asb.removeSessions(failing('disk on fire'), [{ id: 'x', store: 'v1' }]), /disk on fire/)
+})
+
+await check('executableNames appends PATHEXT on Windows only', () => {
+  assert.deepStrictEqual(asb.executableNames('asbutler', false), ['asbutler'])
+  const win = asb.executableNames('asbutler', true, '.COM;.EXE;.CMD')
+  assert.deepStrictEqual(win, ['asbutler.com', 'asbutler.exe', 'asbutler.cmd', 'asbutler'])
+  // An explicit suffix is already a full name; do not build asbutler.exe.exe.
+  assert.deepStrictEqual(asb.executableNames('asbutler.exe', true, '.EXE'), ['asbutler.exe'])
+  assert.deepStrictEqual(asb.executableNames('ASBUTLER.EXE', true, '.exe'), ['ASBUTLER.EXE'])
+})
+
+await check('looksLikePath recognises Windows locations', () => {
+  // The screenshot's case: a drive-letter path must not be treated as a bare command.
+  assert.ok(asb.looksLikePath('C:\\Users\\xxs_e\\.local\\bin\\asbutler.exe', true))
+  assert.ok(asb.looksLikePath('C:/Users/xxs_e/asbutler.exe', true))
+  assert.ok(!asb.looksLikePath('asbutler', true))
+  assert.ok(asb.looksLikePath('/usr/local/bin/asbutler', false))
+  assert.ok(!asb.looksLikePath('asbutler', false))
+})
+
+await check('a Windows PATH survives splitting, which ":" destroyed', () => {
+  // Why Windows never found it: splitting on ':' turned C:\Users\… into "C" and "\Users\…".
+  const winPath = 'C:\\Users\\xxs_e\\.local\\bin;C:\\Windows\\system32'
+  assert.deepStrictEqual(winPath.split(';'), ['C:\\Users\\xxs_e\\.local\\bin', 'C:\\Windows\\system32'])
+  assert.ok(winPath.split(':').length > 2, 'splitting on ":" shatters drive letters')
+})
+
+await check('SEARCH_DIRS carries no paths from the other platform', () => {
+  const unixish = asb.SEARCH_DIRS.filter(d => d.startsWith('/'))
+  assert.strictEqual(asb.IS_WINDOWS ? unixish.length : 0, 0, asb.SEARCH_DIRS.join(' '))
+  assert.ok(asb.SEARCH_DIRS.every(d => d.length > 0))
+})
+
 console.log(`\n${passed} passed`)

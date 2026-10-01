@@ -1,36 +1,72 @@
 import { execFile } from 'child_process'
 import { accessSync, constants } from 'fs'
 import { homedir, userInfo } from 'os'
-import { join } from 'path'
+import { delimiter, join, posix, win32 } from 'path'
+
+export const IS_WINDOWS = process.platform === 'win32'
 
 /** Fallback only: used when the login-shell PATH cannot be resolved. ADR-0002 D4. */
-export const SEARCH_DIRS = [
-  join(homedir(), '.local', 'bin'),
-  '/opt/homebrew/bin',
-  '/usr/local/bin',
-  '/usr/bin',
-]
+export const SEARCH_DIRS = IS_WINDOWS
+  ? [
+    join(homedir(), '.local', 'bin'),
+    join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Programs'),
+  ]
+  : [
+    join(homedir(), '.local', 'bin'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+  ]
 
+/** X_OK is a no-op on Windows, where being on PATH with a PATHEXT suffix is what counts. */
 function isExecutable(p: string): boolean {
   try {
-    accessSync(p, constants.X_OK)
+    accessSync(p, IS_WINDOWS ? constants.F_OK : constants.X_OK)
     return true
   } catch {
     return false
   }
 }
 
+/**
+ * `asbutler` must become `asbutler.exe` on Windows; an explicit suffix is left alone.
+ * `win` is a parameter so both branches are testable from either platform.
+ */
+export function executableNames(
+  name: string,
+  win = IS_WINDOWS,
+  pathext = process.env.PATHEXT,
+): string[] {
+  if (!win) {
+    return [name]
+  }
+  const exts = (pathext ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  if (exts.some(e => name.toLowerCase().endsWith(e.toLowerCase()))) {
+    return [name]
+  }
+  return [...exts.map(e => name + e.toLowerCase()), name]
+}
+
+/** True when the value names a location rather than a bare command to look up on PATH. */
+export function looksLikePath(value: string, win = IS_WINDOWS): boolean {
+  return win
+    ? win32.isAbsolute(value) || value.includes('\\') || value.includes('/')
+    : posix.isAbsolute(value) || value.includes('/')
+}
+
 export function resolveBinary(configured: string, path: string): string | null {
   const expanded = configured.startsWith('~')
     ? join(homedir(), configured.slice(1))
     : configured
-  if (expanded.includes('/')) {
-    return isExecutable(expanded) ? expanded : null
+  if (looksLikePath(expanded)) {
+    return executableNames(expanded).find(isExecutable) ?? null
   }
-  for (const dir of path.split(':').filter(Boolean)) {
-    const candidate = join(dir, expanded)
-    if (isExecutable(candidate)) {
-      return candidate
+  for (const dir of path.split(delimiter).filter(Boolean)) {
+    for (const name of executableNames(expanded)) {
+      const candidate = join(dir, name)
+      if (isExecutable(candidate)) {
+        return candidate
+      }
     }
   }
   return null
@@ -176,8 +212,15 @@ export function execOverSsh(
 
 let localPath: Promise<string | null> | null = null
 
-/** The user's login-shell PATH on this machine, resolved once; null if the shell misbehaves. */
+/**
+ * The user's login-shell PATH on this machine, resolved once; null if the shell misbehaves.
+ * Skipped on Windows: there is no launchd stripping the environment, so the process already
+ * has the user's PATH, and `$SHELL -i -l -c` has no meaning there.
+ */
 export function loginPath(timeoutMs = 10000): Promise<string | null> {
+  if (IS_WINDOWS) {
+    return Promise.resolve(null)
+  }
   localPath ??= new Promise(resolve => {
     const shell = process.env.SHELL || userInfo().shell || '/bin/zsh'
     const child = execFile(shell, ['-i', '-l', '-c', PATH_PROBE], { timeout: timeoutMs }, (_, stdout) =>
@@ -204,8 +247,9 @@ export function remoteLoginPath(client: any, where: string): Promise<string | nu
 
 /** Login-shell PATH first, then the fallback dirs, then whatever Tabby inherited; deduped. */
 export async function childPath(): Promise<string> {
-  const split = (p: string | null | undefined) => (p ?? '').split(':').filter(Boolean)
-  return [...new Set([...split(await loginPath()), ...SEARCH_DIRS, ...split(process.env.PATH)])].join(':')
+  const split = (p: string | null | undefined) => (p ?? '').split(delimiter).filter(Boolean)
+  return [...new Set([...split(await loginPath()), ...SEARCH_DIRS, ...split(process.env.PATH)])]
+    .join(delimiter)
 }
 
 /** Local runner; `rm` exits non-zero but still prints why, so stdout wins when present. */
@@ -280,6 +324,7 @@ export function isPlaceholderTitle(session: { id: string, title: string }): bool
 export async function removeSessions(
   runner: Runner,
   targets: { id: string, store: string }[],
+  allWithId = false,
 ): Promise<RemoveResult[]> {
   const byStore = new Map<string, string[]>()
   for (const t of targets) {
@@ -287,17 +332,33 @@ export async function removeSessions(
   }
   const results: RemoveResult[] = []
   for (const [store, ids] of byStore) {
-    results.push(...await removeOneStore(runner, ids, store))
+    results.push(...await removeOneStore(runner, ids, store, allWithId))
   }
   return results
+}
+
+/** asbutler's refusal when one Kiro v1 id names conversations in several cwds; they can only go together. */
+export function needsAllWithId(error: string | undefined): boolean {
+  return !!error?.includes('--all-with-id')
 }
 
 async function removeOneStore(
   runner: Runner,
   ids: string[],
   store: string,
+  allWithId: boolean,
 ): Promise<RemoveResult[]> {
-  const stdout = await runner.run(['rm', ...ids, ...storeArgs({ store })])
+  const argv = ['rm', ...ids, ...storeArgs({ store }), ...(allWithId ? ['--all-with-id'] : [])]
+  let stdout: string
+  try {
+    stdout = await runner.run(argv)
+  } catch (e: any) {
+    // The refusal may arrive as a failed run instead of a JSON result; treat it as a per-id answer.
+    if (!needsAllWithId(e?.message)) {
+      throw e
+    }
+    return ids.map(id => ({ id, deleted: false, error: String(e.message) }))
+  }
   try {
     return JSON.parse(stdout)
   } catch {

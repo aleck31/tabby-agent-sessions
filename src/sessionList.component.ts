@@ -8,12 +8,15 @@ import {
 
 import {
   AgentSession,
+  IS_WINDOWS,
+  RemoveResult,
   Runner,
   SEARCH_DIRS,
   humanSize,
   listSessions,
   childPath,
   localRunner,
+  needsAllWithId,
   remoteRunner,
   isPlaceholderTitle,
   rowKey,
@@ -357,7 +360,8 @@ export class SessionListTabComponent extends BaseTabComponent {
     try {
       // Same transport as the listing, or a remote row's delete would run here instead.
       const runner = await this.runnerFor(this.focusedSibling()?.session)
-      const results = await asbutlerRemove(runner, doomed)
+      let results = await asbutlerRemove(runner, doomed)
+      results = await this.confirmAllWithId(runner, doomed, results)
       // Match on id: asbutler's result rows carry the id, and the store came from our call.
       const gone = new Set(results.filter(r => r.deleted).map(r => r.id))
       const removed = this.sessions.filter(s => gone.has(s.id) && doomed.includes(s))
@@ -372,6 +376,40 @@ export class SessionListTabComponent extends BaseTabComponent {
     } catch (e: any) {
       this.notifications.error(`Delete failed: ${e.message ?? String(e)}`)
     }
+  }
+
+  /**
+   * Kiro deletes v1 conversations by id, so one id saved in several cwds can only go together;
+   * asbutler refuses until told so. Ask, showing its own list of what else goes, then retry.
+   */
+  private async confirmAllWithId(
+    runner: Runner,
+    doomed: AgentSession[],
+    results: RemoveResult[],
+  ): Promise<RemoveResult[]> {
+    const blocked = results.filter(r => !r.deleted && needsAllWithId(r.error))
+    if (!blocked.length) {
+      return results
+    }
+    const { response } = await this.platform.showMessageBox({
+      type: 'warning',
+      message: 'This session is saved in more than one directory',
+      detail: [
+        ...blocked.map(r => r.error ?? ''),
+        '',
+        'Kiro can only delete all of them together. This cannot be undone.',
+      ].join('\n'),
+      buttons: ['Cancel', 'Delete all'],
+      defaultId: 0,
+      cancelId: 0,
+    })
+    const ids = new Set(blocked.map(r => r.id))
+    if (response !== 1) {
+      // Cancelling is not a failure; drop them from the result so no error toast follows.
+      return results.filter(r => !ids.has(r.id))
+    }
+    const retried = await asbutlerRemove(runner, doomed.filter(s => ids.has(s.id)), true)
+    return [...results.filter(r => !ids.has(r.id)), ...retried]
   }
 
   private removalDetail(doomed: AgentSession[], locked: AgentSession[]): string {
@@ -545,8 +583,9 @@ export class SessionListTabComponent extends BaseTabComponent {
     const bin = resolveBinary(this.bin, path)
     if (!bin) {
       throw new Error(
-        `asbutler is not installed on this machine — '${this.bin}' is not on your login-shell PATH ` +
-        `(or ${SEARCH_DIRS.join(', ')}). Set agentSessions.binary in config.yaml if it lives elsewhere.`,
+        `asbutler is not installed on this machine — '${this.bin}' is not on ` +
+        `${IS_WINDOWS ? 'your PATH' : 'your login-shell PATH'} (or ${SEARCH_DIRS.join(', ')}). ` +
+        `Set agentSessions.binary in config.yaml if it lives elsewhere.`,
       )
     }
     return localRunner(bin, path)
