@@ -119,12 +119,56 @@ await check('isPlaceholderTitle matches only the synthesised form', () => {
   assert.ok(!asb.isPlaceholderTitle({ id, title: '(untitled · deadbeef)' }))
 })
 
-await check('childPath puts the search dirs ahead of the inherited PATH', () => {
-  const p = asb.childPath().split(':')
-  // asbutler execs kiro-cli itself, and Tabby's launchd PATH does not contain it.
-  assert.ok(p.some(d => d.endsWith('/.local/bin')), asb.childPath())
-  assert.ok(p.indexOf('/usr/bin') > 0, 'search dirs must come first')
-  assert.strictEqual(new Set(p).size, p.length, 'no duplicate entries')
+await check('extractMarked ignores whatever a profile prints around the probe', () => {
+  const m = asb.PATH_MARK
+  assert.strictEqual(asb.extractMarked(`Welcome!\nconda init…\n${m}/a:/b${m}\nbye`), '/a:/b')
+  assert.strictEqual(asb.extractMarked('no marks here'), null)
+  assert.strictEqual(asb.extractMarked(`${m}${m}`), null, 'empty PATH is not a result')
+})
+
+await check('remoteCommand pins a resolved PATH before probing, quoted', () => {
+  const cmd = asb.remoteCommand(['asbutler', 'list'], "/home/u/.local/bin:/it's/bin")
+  assert.ok(cmd.indexOf('export PATH=') < cmd.indexOf('command -v'), cmd)
+  const echoed = execFileSync('sh', ['-c', cmd.split(';')[0] + '; printf %s "$PATH"']).toString()
+  assert.strictEqual(echoed, "/home/u/.local/bin:/it's/bin")
+  assert.ok(!asb.remoteCommand(['x']).includes('export PATH'), 'no prefix when unresolved')
+})
+
+await check('loginPath recovers the real PATH from a launchd-minimal environment', () => {
+  // Tabby's own env: launchd hands GUI apps only these four directories.
+  const script = `import(${JSON.stringify(join(out, 'asbutler.js'))}).then(m => m.loginPath()).then(p => process.stdout.write(p ?? ''))`
+  const resolved = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: { HOME: process.env.HOME, SHELL: process.env.SHELL, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+  }).toString()
+  // Baseline from the same clean env: this test may itself run inside a terminal that injected extra dirs.
+  const real = execFileSync(process.env.SHELL, ['-ilc', 'printf %s "$PATH"'], {
+    env: { HOME: process.env.HOME, SHELL: process.env.SHELL, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).toString()
+  assert.ok(resolved.split(':').length > 4, `resolved only: ${resolved}`)
+  assert.deepStrictEqual(resolved.split(':'), real.split(':'))
+})
+
+await check('childPath leads with the login PATH, keeps the fallbacks, has no duplicates', async () => {
+  const p = (await asb.childPath()).split(':')
+  const login = (await asb.loginPath()).split(':')
+  assert.deepStrictEqual(p.slice(0, new Set(login).size), [...new Set(login)])
+  assert.ok(asb.SEARCH_DIRS.every(d => p.includes(d)))
+  assert.strictEqual(new Set(p).size, p.length)
+})
+
+await check('resumeLine uses asbutler argv verbatim, absent means no resume', () => {
+  const r = ['kiro-cli', 'chat', '--resume-id', '8c4f0f8b-26eb-42f8-b4b9-c9b443daf872', '--agent-engine', 'v1']
+  assert.strictEqual(asb.resumeLine({ resume: r }), r.join(' '), 'plain args stay unquoted')
+  assert.strictEqual(asb.resumeLine({}), null)
+  assert.strictEqual(asb.resumeLine({ resume: [] }), null)
+})
+
+await check('resumeLine quotes anything a shell would reinterpret', () => {
+  const nasty = ['echo', "it's", 'a b', '$(touch /tmp/x)', '`id`']
+  const line = asb.resumeLine({ resume: nasty })
+  const out = execFileSync('sh', ['-c', `printf '%s\\n' ${line.slice('echo '.length)}`]).toString().trimEnd().split('\n')
+  assert.deepStrictEqual(out, nasty.slice(1))
 })
 
 console.log(`\n${passed} passed`)

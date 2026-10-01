@@ -12,11 +12,13 @@ import {
   SEARCH_DIRS,
   humanSize,
   listSessions,
+  childPath,
   localRunner,
   remoteRunner,
   isPlaceholderTitle,
   rowKey,
   removeSessions as asbutlerRemove,
+  resumeLine,
   renameSession,
   resolveBinary,
 } from './asbutler'
@@ -24,22 +26,6 @@ import { PaneWidth } from './paneWidth'
 
 /** Injected by webpack's DefinePlugin; tells you which bundle Tabby actually loaded. */
 declare const __PLUGIN_BUILD__: string
-
-/**
- * Keyed on asbutler's `agent` string. Absent agent = no resume, rather than a guessed
- * command that would launch the wrong thing; asbutler itself has no resume subcommand.
- *
- * `--agent-engine v1` only for a v1 row whose id also exists in v2, where a bare resume
- * would not reach it. Never for v2: it is the default, and passing it explicitly is not a
- * no-op. Not `--session-source` either, which only accompanies --delete-session.
- */
-const RESUME_ARGV: Record<string, (s: AgentSession, shared: boolean) => string[]> = {
-  'Claude Code': s => ['claude', '--resume', s.id],
-  Kiro: (s, shared) => [
-    'kiro-cli', 'chat', '--resume-id', s.id,
-    ...(shared && s.store === 'v1' ? ['--agent-engine', 'v1'] : []),
-  ],
-}
 
 @Component({
   selector: 'agent-session-list',
@@ -234,17 +220,12 @@ export class SessionListTabComponent extends BaseTabComponent {
     const command = this.resumeCommand(s)
     return command
       ? `Double-click to run in the terminal beside this list:\n${command}`
-      : `No resume command known for ${s.agent}`
+      : `asbutler offers no resume command for ${s.agent}`
   }
 
   /** Rows are keyed by id *and* store: Kiro reuses ids across its v1 and v2 stores. */
   key(s: AgentSession): string {
     return rowKey(s)
-  }
-
-  /** Same id in more than one store; only then does a bare --resume-id need disambiguating. */
-  private sharesIdAcrossStores(s: AgentSession): boolean {
-    return this.sessions.filter(x => x.id === s.id).length > 1
   }
 
   /** v1 stores no title of its own — Kiro derives it from the first prompt — so asbutler refuses. */
@@ -332,7 +313,7 @@ export class SessionListTabComponent extends BaseTabComponent {
       return
     }
     try {
-      const runner = this.runnerFor(this.focusedSibling()?.session)
+      const runner = await this.runnerFor(this.focusedSibling()?.session)
       await renameSession(runner, s, title)
       // Patch in place rather than re-querying; a directory scan costs a subprocess.
       s.title = title
@@ -375,7 +356,7 @@ export class SessionListTabComponent extends BaseTabComponent {
 
     try {
       // Same transport as the listing, or a remote row's delete would run here instead.
-      const runner = this.runnerFor(this.focusedSibling()?.session)
+      const runner = await this.runnerFor(this.focusedSibling()?.session)
       const results = await asbutlerRemove(runner, doomed)
       // Match on id: asbutler's result rows carry the id, and the store came from our call.
       const gone = new Set(results.filter(r => r.deleted).map(r => r.id))
@@ -436,13 +417,9 @@ export class SessionListTabComponent extends BaseTabComponent {
     }
   }
 
-  /** The id reaches a live shell as text, so reject anything that isn't inert before joining. */
+  /** asbutler owns the per-agent syntax and store disambiguation; we only quote it. asbutler#5 */
   private resumeCommand(s: AgentSession): string | null {
-    const build = RESUME_ARGV[s.agent]
-    if (!build || !/^[A-Za-z0-9._-]+$/.test(s.id)) {
-      return null
-    }
-    return build(s, this.sharesIdAcrossStores(s)).join(' ')
+    return resumeLine(s)
   }
 
   private get bin(): string {
@@ -511,7 +488,7 @@ export class SessionListTabComponent extends BaseTabComponent {
 
     this.loading = true
     try {
-      const runner = this.runnerFor(this.focusedSibling()?.session)
+      const runner = await this.runnerFor(this.focusedSibling()?.session)
       this.transport = runner.remote ? `on ${runner.where}` : null
       const sessions = await listSessions(runner, cwd)
       if (generation !== this.generation) {
@@ -559,19 +536,20 @@ export class SessionListTabComponent extends BaseTabComponent {
    * `.ssh`, whose `.ssh` is the live russh client — duck-typed, since the class name
    * does not survive minification.
    */
-  private runnerFor(session: any): Runner {
+  private async runnerFor(session: any): Promise<Runner> {
     const client = session?.ssh?.ssh
     if (client?.openSessionChannel && client?.activateChannel) {
       return remoteRunner(client, session.ssh.profile?.options?.host ?? 'the remote host')
     }
-    const bin = resolveBinary(this.bin)
+    const path = await childPath()
+    const bin = resolveBinary(this.bin, path)
     if (!bin) {
       throw new Error(
-        `asbutler is not installed on this machine.\nLooked in ${SEARCH_DIRS.join(', ')} ` +
-        `and $PATH for '${this.bin}'. Set agentSessions.binary in config.yaml if it lives elsewhere.`,
+        `asbutler is not installed on this machine — '${this.bin}' is not on your login-shell PATH ` +
+        `(or ${SEARCH_DIRS.join(', ')}). Set agentSessions.binary in config.yaml if it lives elsewhere.`,
       )
     }
-    return localRunner(bin)
+    return localRunner(bin, path)
   }
 
   /** cwd of the focused sibling pane; null for SSH/serial tabs, which have no local cwd. */

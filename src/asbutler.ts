@@ -1,9 +1,9 @@
 import { execFile } from 'child_process'
 import { accessSync, constants } from 'fs'
-import { homedir } from 'os'
+import { homedir, userInfo } from 'os'
 import { join } from 'path'
 
-/** GUI apps inherit a minimal PATH from launchd, so resolve the binary ourselves. */
+/** Fallback only: used when the login-shell PATH cannot be resolved. ADR-0002 D4. */
 export const SEARCH_DIRS = [
   join(homedir(), '.local', 'bin'),
   '/opt/homebrew/bin',
@@ -20,15 +20,14 @@ function isExecutable(p: string): boolean {
   }
 }
 
-export function resolveBinary(configured: string): string | null {
+export function resolveBinary(configured: string, path: string): string | null {
   const expanded = configured.startsWith('~')
     ? join(homedir(), configured.slice(1))
     : configured
   if (expanded.includes('/')) {
     return isExecutable(expanded) ? expanded : null
   }
-  const dirs = [...SEARCH_DIRS, ...(process.env.PATH ?? '').split(':').filter(Boolean)]
-  for (const dir of dirs) {
+  for (const dir of path.split(':').filter(Boolean)) {
     const candidate = join(dir, expanded)
     if (isExecutable(candidate)) {
       return candidate
@@ -51,6 +50,8 @@ export interface AgentSession {
   sizeHuman: string
   modifiedAt: string
   locked: boolean
+  /** argv that resumes this row, bare binary name; absent when the agent has none. asbutler#5 */
+  resume?: string[]
 }
 
 export interface RemoveResult {
@@ -79,6 +80,25 @@ export function storeArgs(s: { store: string }): string[] {
   return s.store ? ['--store', s.store] : []
 }
 
+/** Brackets the probe's output, so anything a profile prints around it is ignored. */
+export const PATH_MARK = '__asbutler_path__'
+
+/** Asks `-i -l` because PATH may be set in rc files (interactive) or profiles (login). */
+export const PATH_PROBE = `printf %s ${PATH_MARK}; printf %s "$PATH"; printf %s ${PATH_MARK}`
+
+export function extractMarked(stdout: string): string | null {
+  const parts = stdout.split(PATH_MARK)
+  return parts.length >= 3 && parts[1].trim() ? parts[1].trim() : null
+}
+
+/** One line to type into the user's shell; quotes only the args that need it, so it stays readable. */
+export function resumeLine(s: { resume?: string[] }): string | null {
+  if (!s.resume?.length) {
+    return null
+  }
+  return s.resume.map(a => /^[A-Za-z0-9._\/:=@%+-]+$/.test(a) ? a : quoteArgv([a])).join(' ')
+}
+
 export function quoteArgv(argv: string[]): string {
   return argv.map(a => `'${a.replace(/'/g, `'\\''`)}'`).join(' ')
 }
@@ -90,8 +110,9 @@ export const MISSING_MARKER = '__asbutler_missing__'
  * and stderr wording is shell- and locale-dependent. `if` rather than `||`, so asbutler's
  * own non-zero exits are not mistaken for it being absent.
  */
-export function remoteCommand(argv: string[]): string {
-  return `if command -v asbutler >/dev/null 2>&1; then ${quoteArgv(argv)}; ` +
+export function remoteCommand(argv: string[], path: string | null = null): string {
+  const env = path ? `export PATH=${quoteArgv([path])}; ` : ''
+  return `${env}if command -v asbutler >/dev/null 2>&1; then ${quoteArgv(argv)}; ` +
     `else echo ${MISSING_MARKER}; fi`
 }
 
@@ -110,12 +131,12 @@ export function interpretOutput(stdout: string, stderr: string, where: string): 
  * Execs over Tabby's already-authenticated russh connection, so there is no second
  * login and no key prompt. Reads until eof/close, since exec has no other end marker.
  */
-export function runOverSsh(
+export function execOverSsh(
   client: any,
-  argv: string[],
+  command: string,
   where: string,
   timeoutMs = 10000,
-): Promise<string> {
+): Promise<{ stdout: string, stderr: string }> {
   return new Promise(async (resolve, reject) => {
     const out: Buffer[] = []
     const err: Buffer[] = []
@@ -129,24 +150,14 @@ export function runOverSsh(
       done = true
       clearTimeout(timer)
       channel?.close?.()?.catch?.(() => {})
-      if (failure) {
-        reject(failure)
-        return
-      }
-      try {
-        resolve(interpretOutput(
-          Buffer.concat(out).toString('utf8'),
-          Buffer.concat(err).toString('utf8'),
-          where,
-        ))
-      } catch (e: any) {
-        reject(e)
-      }
+      failure
+        ? reject(failure)
+        : resolve({ stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') })
     }
 
     // Armed before opening the channel: a hang in activation left this pending forever.
     const timer = setTimeout(
-      () => finish(new Error(`asbutler on ${where} did not respond within ${timeoutMs / 1000}s`)),
+      () => finish(new Error(`${where} did not respond within ${timeoutMs / 1000}s`)),
       timeoutMs,
     )
 
@@ -156,33 +167,54 @@ export function runOverSsh(
       channel.extendedData$?.subscribe((d: any) => err.push(Buffer.from(d?.data ?? d)))
       channel.eof$?.subscribe(() => finish())
       channel.closed$?.subscribe(() => finish())
-      await channel.requestExec(remoteCommand(argv))
+      await channel.requestExec(command)
     } catch (e: any) {
       finish(e instanceof Error ? e : new Error(String(e)))
     }
   })
 }
 
-/**
- * Resolving asbutler's own path is not enough: it execs agent CLIs itself (deleting a Kiro
- * v1 session shells out to `kiro-cli`), and those inherit Tabby's launchd PATH. ADR-0002 D4.
- */
-export function childPath(): string {
-  const inherited = (process.env.PATH ?? '').split(':').filter(Boolean)
-  // Dedupe the whole list: an inherited PATH commonly repeats entries.
-  return [...new Set([...SEARCH_DIRS, ...inherited])].join(':')
+let localPath: Promise<string | null> | null = null
+
+/** The user's login-shell PATH on this machine, resolved once; null if the shell misbehaves. */
+export function loginPath(timeoutMs = 10000): Promise<string | null> {
+  localPath ??= new Promise(resolve => {
+    const shell = process.env.SHELL || userInfo().shell || '/bin/zsh'
+    const child = execFile(shell, ['-i', '-l', '-c', PATH_PROBE], { timeout: timeoutMs }, (_, stdout) =>
+      resolve(extractMarked(String(stdout ?? ''))))
+    child.stdin?.end()
+  })
+  return localPath
+}
+
+const remotePaths = new WeakMap<object, Promise<string | null>>()
+
+/** Same probe on the remote host, resolved once per SSH connection. */
+export function remoteLoginPath(client: any, where: string): Promise<string | null> {
+  let cached = remotePaths.get(client)
+  if (!cached) {
+    const probe = `"\${SHELL:-/bin/sh}" -i -l -c ${quoteArgv([PATH_PROBE])} </dev/null`
+    cached = execOverSsh(client, probe, where)
+      .then(({ stdout }) => extractMarked(stdout))
+      .catch(() => null)
+    remotePaths.set(client, cached)
+  }
+  return cached
+}
+
+/** Login-shell PATH first, then the fallback dirs, then whatever Tabby inherited; deduped. */
+export async function childPath(): Promise<string> {
+  const split = (p: string | null | undefined) => (p ?? '').split(':').filter(Boolean)
+  return [...new Set([...split(await loginPath()), ...SEARCH_DIRS, ...split(process.env.PATH)])].join(':')
 }
 
 /** Local runner; `rm` exits non-zero but still prints why, so stdout wins when present. */
-export function localRunner(bin: string): Runner {
+export function localRunner(bin: string, path: string): Runner {
   return {
     remote: false,
     where: 'this machine',
     run: argv => new Promise((resolve, reject) => {
-      const options = {
-        maxBuffer: 32 * 1024 * 1024,
-        env: { ...process.env, PATH: childPath() },
-      }
+      const options = { maxBuffer: 32 * 1024 * 1024, env: { ...process.env, PATH: path } }
       execFile(bin, argv, options, (err, stdout) => {
         stdout ? resolve(stdout) : reject(err ?? new Error('asbutler produced no output'))
       })
@@ -190,12 +222,16 @@ export function localRunner(bin: string): Runner {
   }
 }
 
+/** Bare `asbutler`, found via the remote login PATH; agentSessions.binary is a local path. */
 export function remoteRunner(client: any, host: string): Runner {
-  // Bare name: agentSessions.binary is a path on *this* machine, meaningless there.
   return {
     remote: true,
     where: host,
-    run: argv => runOverSsh(client, ['asbutler', ...argv], host),
+    run: async argv => {
+      const path = await remoteLoginPath(client, host)
+      const { stdout, stderr } = await execOverSsh(client, remoteCommand(['asbutler', ...argv], path), host)
+      return interpretOutput(stdout, stderr, host)
+    },
   }
 }
 
@@ -206,7 +242,7 @@ export async function listSessions(runner: Runner, cwd: string): Promise<AgentSe
     return JSON.parse(stdout).sessions ?? []
   } catch {
     throw new Error(
-      `asbutler on ${runner.where} returned non-JSON output — needs asbutler >= 0.8.1`,
+      `asbutler on ${runner.where} returned non-JSON output — needs asbutler >= 0.8.5`,
     )
   }
 }
