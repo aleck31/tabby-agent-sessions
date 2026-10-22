@@ -314,6 +314,39 @@ export async function renameSession(
   }
 }
 
+/**
+ * Short ids for display. A plain 8-char prefix stopped discriminating: Kiro v3 ids are
+ * `cli_<uuid>_<suffix>` differing only at the end, and Codex's are time-ordered. So a
+ * colliding group shows the 8 chars after its own longest common prefix instead.
+ */
+export function shortIds(ids: string[], width = 8): Map<string, string> {
+  const groups = new Map<string, string[]>()
+  for (const id of ids) {
+    const head = id.slice(0, width)
+    groups.set(head, [...(groups.get(head) ?? []), id])
+  }
+  const out = new Map<string, string>()
+  for (const [head, group] of groups) {
+    if (group.length === 1) {
+      out.set(group[0], head)
+      continue
+    }
+    const skip = commonPrefixLength(group)
+    for (const id of group) {
+      out.set(id, id.slice(skip, skip + width) || head)
+    }
+  }
+  return out
+}
+
+function commonPrefixLength(values: string[]): number {
+  let i = 0
+  while (values.every(v => i < v.length && v[i] === values[0][i])) {
+    i++
+  }
+  return i
+}
+
 /** asbutler synthesises this for a session with no title of its own; never commit it back. */
 export function isPlaceholderTitle(session: { id: string, title: string }): boolean {
   return session.title === `(untitled · ${session.id.slice(0, 8)})`

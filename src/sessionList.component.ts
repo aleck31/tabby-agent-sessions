@@ -20,6 +20,7 @@ import {
   remoteRunner,
   isPlaceholderTitle,
   rowKey,
+  shortIds,
   removeSessions as asbutlerRemove,
   resumeLine,
   renameSession,
@@ -82,7 +83,7 @@ declare const __PLUGIN_BUILD__: string
            (dblclick)="resume(s)">
         <div class="as-line1">
           <span class="as-when">{{ s.modifiedAt | date: 'MM-dd HH:mm' }}</span>
-          <span class="as-id">{{ s.id.slice(0, 8) }}</span>
+          <span class="as-id">{{ shortId(s) }}</span>
           <span class="as-orphan" *ngIf="s.orphan"
                 title="This session's directory no longer exists">orphan</span>
           <span class="as-store" *ngIf="s.store" [class.as-stale-store]="s.store !== 'v3'"
@@ -230,6 +231,13 @@ export class SessionListTabComponent extends BaseTabComponent {
       : `asbutler offers no resume command for ${s.agent}`
   }
 
+  /** Display ids, recomputed with the visible rows so a colliding group gets a longer window. */
+  private short = new Map<string, string>()
+
+  shortId(s: AgentSession): string {
+    return this.short.get(s.id) ?? s.id.slice(0, 8)
+  }
+
   /** The split matters: 554 messages can be 59 things you said. Absent parts are omitted. */
   yoursSuffix(s: AgentSession): string {
     const b = s.breakdown
@@ -314,6 +322,7 @@ export class SessionListTabComponent extends BaseTabComponent {
     this.visible = this.agentFilter
       ? this.sessions.filter(s => s.agent === this.agentFilter)
       : this.sessions
+    this.short = shortIds(this.visible.map(s => s.id))
     const counts = new Map<string, number>()
     for (const s of this.sessions) {
       counts.set(s.agent, (counts.get(s.agent) ?? 0) + 1)
@@ -454,7 +463,7 @@ export class SessionListTabComponent extends BaseTabComponent {
          doomed[0].title || doomed[0].id]
       : [`${doomed.reduce((n, s) => n + s.messageCount, 0)} messages, ` +
          `${humanSize(doomed.reduce((n, s) => n + s.fileSize, 0))} total`,
-         ...doomed.slice(0, 6).map(s => `· ${s.id.slice(0, 8)}  ${s.title || '(untitled)'}`),
+         ...doomed.slice(0, 6).map(s => `· ${this.shortId(s)}  ${s.title || '(untitled)'}`),
          ...(doomed.length > 6 ? [`· …and ${doomed.length - 6} more`] : [])]
     if (locked.length) {
       lines.push('', `${locked.length} held by a running agent will be skipped.`)

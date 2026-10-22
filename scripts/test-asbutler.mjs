@@ -224,4 +224,33 @@ await check('SEARCH_DIRS carries no paths from the other platform', () => {
   assert.ok(asb.SEARCH_DIRS.every(d => d.length > 0))
 })
 
+await check('shortIds keeps an 8-char prefix when nothing collides', () => {
+  const m = asb.shortIds(['1bb9ee04-62d1-412b', 'dfe431f8-c634-4f26'])
+  assert.strictEqual(m.get('1bb9ee04-62d1-412b'), '1bb9ee04')
+})
+
+await check('shortIds discriminates Kiro v3 ids that differ only in the suffix', () => {
+  // Three real sessions in one directory, same title, same 'cli_bf4c' prefix.
+  const ids = [
+    'cli_bf4c16a8-ed4d-44ef-ba96-44f3104d26f7_Cqt24wzJ',
+    'cli_bf4c16a8-ed4d-44ef-ba96-44f3104d26f7_rWOJyjQx',
+    'cli_bf4c16a8-ed4d-44ef-ba96-44f3104d26f7_qOxLRWht',
+  ]
+  const got = ids.map(i => asb.shortIds(ids).get(i))
+  assert.deepStrictEqual(got, ['Cqt24wzJ', 'rWOJyjQx', 'qOxLRWht'])
+  assert.strictEqual(new Set(got).size, 3)
+})
+
+await check('shortIds discriminates Codex time-ordered ids', () => {
+  const ids = ['01a10af7-b47d-7570-a860-87a5614d8cb7', '01a10af7-6539-7c51-84b9-a039816af496']
+  const got = ids.map(i => asb.shortIds(ids).get(i))
+  assert.strictEqual(new Set(got).size, 2, got.join(' '))
+})
+
+await check('shortIds falls back when two ids are identical', () => {
+  // Same id in Kiro's v1 and v2 stores: the store badge is what tells them apart.
+  const ids = ['4a951bcf-5708-40ac-ac35-0be5c6512f39', '4a951bcf-5708-40ac-ac35-0be5c6512f39']
+  assert.strictEqual(asb.shortIds(ids).get(ids[0]), '4a951bcf')
+})
+
 console.log(`\n${passed} passed`)
