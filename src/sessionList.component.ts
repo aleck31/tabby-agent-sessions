@@ -493,10 +493,11 @@ export class SessionListTabComponent extends BaseTabComponent {
       return
     }
 
+    // CR, not LF: that is what Enter sends. PowerShell treats a bare LF as a continuation.
     if (tab.sendInput) {
-      tab.sendInput(command + '\n')
+      tab.sendInput(command + '\r')
     } else {
-      session.write(Buffer.from(command + '\n'))
+      session.write(Buffer.from(command + '\r'))
     }
   }
 
