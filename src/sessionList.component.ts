@@ -85,8 +85,8 @@ declare const __PLUGIN_BUILD__: string
           <span class="as-id">{{ s.id.slice(0, 8) }}</span>
           <span class="as-orphan" *ngIf="s.orphan"
                 title="This session's directory no longer exists">orphan</span>
-          <span class="as-store" *ngIf="s.store === 'v1'"
-                title="Kiro's deprecated v1 store — read-only; opening it copies to v2">v1</span>
+          <span class="as-store" *ngIf="s.store" [class.as-stale-store]="s.store !== 'v3'"
+                [title]="storeHint(s)">{{ s.store }}</span>
           <span class="as-lock" *ngIf="s.locked" title="held by a running agent">🔒</span>
           <span class="as-size">{{ s.sizeHuman }}</span>
         </div>
@@ -161,6 +161,8 @@ declare const __PLUGIN_BUILD__: string
     /* Amber, not red: an orphan is stale, not broken, and red is the delete affordance. */
     .as-store { color: #b39ddb; border: 1px solid rgba(179, 157, 219, .5);
                 border-radius: 3px; padding: 0 3px; font-size: 10px; }
+    /* Dimmer for v1/v2: those are copies Kiro left behind, v3 is the live one. */
+    .as-store.as-stale-store { color: #9e9e9e; border-color: rgba(158, 158, 158, .45); }
     .as-orphan { color: #e0a33e; border: 1px solid rgba(224, 163, 62, .5);
                  border-radius: 3px; padding: 0 3px; font-size: 10px; }
     .as-size { margin-left: auto; opacity: .6; }

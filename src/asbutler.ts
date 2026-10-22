@@ -74,7 +74,7 @@ export function resolveBinary(configured: string, path: string): string | null {
 
 export interface AgentSession {
   id: string
-  /** `v1`/`v2` for Kiro, empty for single-store agents. Kiro reuses ids across stores. */
+  /** `v1`/`v2`/`v3` for Kiro, empty for single-store agents. Kiro reuses ids across stores. */
   store: string
   agent: string
   cwd: string
@@ -286,7 +286,7 @@ export async function listSessions(runner: Runner, cwd: string): Promise<AgentSe
     return JSON.parse(stdout).sessions ?? []
   } catch {
     throw new Error(
-      `asbutler on ${runner.where} returned non-JSON output — needs asbutler >= 0.8.5`,
+      `asbutler on ${runner.where} returned non-JSON output — needs asbutler >= 0.8.7`,
     )
   }
 }
