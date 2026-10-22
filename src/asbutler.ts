@@ -113,9 +113,16 @@ export function rowKey(s: { id: string, store: string }): string {
   return s.store ? `${s.id}:${s.store}` : s.id
 }
 
-/** asbutler refuses an ambiguous id rather than guessing, so pass the store when we have one. */
-export function storeArgs(s: { store: string }): string[] {
-  return s.store ? ['--store', s.store] : []
+/**
+ * An id identifies a session only with its store *and* directory, so send both: asbutler
+ * refuses an ambiguous id rather than guessing. `rm` on a Kiro v1 id still takes every
+ * directory — kiro-cli ignores cwd there — so `--path` narrows the others, not that.
+ */
+export function targetArgs(s: { store: string, cwd?: string }): string[] {
+  return [
+    ...(s.store ? ['--store', s.store] : []),
+    ...(s.cwd ? ['--path', s.cwd] : []),
+  ]
 }
 
 /** Brackets the probe's output, so anything a profile prints around it is ignored. */
@@ -299,10 +306,10 @@ export async function listSessions(runner: Runner, cwd: string): Promise<AgentSe
  */
 export async function renameSession(
   runner: Runner,
-  s: { id: string, store: string },
+  s: { id: string, store: string, cwd?: string },
   title: string,
 ): Promise<void> {
-  const stdout = await runner.run(['rename', s.id, title, ...storeArgs(s)])
+  const stdout = await runner.run(['rename', s.id, title, ...targetArgs(s)])
   let result: { error?: string }
   try {
     result = JSON.parse(stdout)
@@ -358,16 +365,20 @@ export function isPlaceholderTitle(session: { id: string, title: string }): bool
  */
 export async function removeSessions(
   runner: Runner,
-  targets: { id: string, store: string }[],
+  targets: { id: string, store: string, cwd?: string }[],
   allWithId = false,
 ): Promise<RemoveResult[]> {
-  const byStore = new Map<string, string[]>()
+  // Grouped by store *and* cwd, because both flags apply to the whole invocation.
+  const groups = new Map<string, { store: string, cwd?: string, ids: string[] }>()
   for (const t of targets) {
-    byStore.set(t.store, [...(byStore.get(t.store) ?? []), t.id])
+    const key = `${t.store}\u0000${t.cwd ?? ''}`
+    const g = groups.get(key) ?? { store: t.store, cwd: t.cwd, ids: [] }
+    g.ids.push(t.id)
+    groups.set(key, g)
   }
   const results: RemoveResult[] = []
-  for (const [store, ids] of byStore) {
-    results.push(...await removeOneStore(runner, ids, store, allWithId))
+  for (const { store, cwd, ids } of groups.values()) {
+    results.push(...await removeOneStore(runner, ids, { store, cwd }, allWithId))
   }
   return results
 }
@@ -380,10 +391,10 @@ export function needsAllWithId(error: string | undefined): boolean {
 async function removeOneStore(
   runner: Runner,
   ids: string[],
-  store: string,
+  target: { store: string, cwd?: string },
   allWithId: boolean,
 ): Promise<RemoveResult[]> {
-  const argv = ['rm', ...ids, ...storeArgs({ store }), ...(allWithId ? ['--all-with-id'] : [])]
+  const argv = ['rm', ...ids, ...targetArgs(target), ...(allWithId ? ['--all-with-id'] : [])]
   let stdout: string
   try {
     stdout = await runner.run(argv)
