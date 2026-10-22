@@ -47,6 +47,8 @@ declare const __PLUGIN_BUILD__: string
         </button>
       </div>
       <div class="as-cwd" [title]="cwd || ''">{{ cwd || 'no working directory' }}</div>
+      <div class="as-held" *ngIf="heldCwd"
+           title="This terminal stopped reporting a directory — an agent is probably using the whole screen. Showing the last one it reported.">last reported directory</div>
       <div class="as-err" *ngIf="error">{{ error }}</div>
       <div class="as-hint" *ngIf="error?.includes('not installed')">
         Get it from
@@ -127,6 +129,7 @@ declare const __PLUGIN_BUILD__: string
                 padding: 8px; font-size: 12px; }
     .as-head { display: flex; justify-content: space-between; align-items: center; }
     .as-where { opacity: .45; margin-right: auto; margin-left: 6px; }
+    .as-held { opacity: .45; font-style: italic; margin: -4px 0 8px; }
     .as-cwd { opacity: .6; word-break: break-all; margin: 4px 0 8px; font-family: monospace; }
     .as-err { color: #e57373; margin-bottom: 4px; white-space: pre-wrap; }
     .as-hint { opacity: .7; margin-bottom: 8px; }
@@ -230,6 +233,11 @@ export class SessionListTabComponent extends BaseTabComponent {
       ? `Double-click to run in the terminal beside this list:\n${command}`
       : `asbutler offers no resume command for ${s.agent}`
   }
+
+  /** Set while showing a directory the terminal no longer reports; see focusedCwd. */
+  heldCwd = false
+  private cwdTab: any = null
+  private lastCwd: string | null = null
 
   /** Display ids, recomputed with the visible rows so a colliding group gets a longer window. */
   private short = new Map<string, string>()
@@ -637,17 +645,31 @@ export class SessionListTabComponent extends BaseTabComponent {
     return localRunner(bin, path)
   }
 
-  /** cwd of the focused sibling pane; null for SSH/serial tabs, which have no local cwd. */
+  /**
+   * cwd of the focused sibling, or the last one *that same terminal* reported. Windows has no
+   * reliable cwd API: Tabby scrapes the prompt, so a full-screen agent leaves it with nothing
+   * to read. Held per tab, never across tabs — inheriting another pane's directory would be
+   * a confident wrong answer (ADR-0001 D5).
+   */
   private async focusedCwd(): Promise<string | null> {
     for (const tab of this.siblingCandidates()) {
       const session = tab.session
-      if (session?.supportsWorkingDirectory?.()) {
-        const cwd = await session.getWorkingDirectory()
-        if (cwd) {
-          return cwd
-        }
+      if (!session?.supportsWorkingDirectory?.()) {
+        continue
+      }
+      const cwd = await session.getWorkingDirectory()
+      if (cwd) {
+        this.cwdTab = tab
+        this.lastCwd = cwd
+        this.heldCwd = false
+        return cwd
+      }
+      if (tab === this.cwdTab && this.lastCwd) {
+        this.heldCwd = true
+        return this.lastCwd
       }
     }
+    this.heldCwd = false
     return null
   }
 }

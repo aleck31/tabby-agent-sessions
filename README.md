@@ -44,6 +44,14 @@ Restart Tabby to load a rebuilt bundle — it reads plugins once at startup.
 
 - delete is permanent, and can't be made recoverable here — asbutler unlinks the file and the JSON row exposes no path, which also rules out reveal-in-Finder entirely
 - no `TabRecoveryProvider`, so the pane doesn't survive a restart (and `recoverTabs` is off in this config anyway)
+- **on Windows the directory is scraped from terminal output**, not queried — PowerShell doesn't move its process cwd on `cd` — so a full-screen agent leaves Tabby nothing to read. The pane then holds that terminal's last reported directory and says so, rather than emptying. To fix it properly, have your prompt report the directory — Tabby prefers a reported cwd over everything else and keeps it, so it stays correct while an agent owns the screen. Append to your `$PROFILE` (`notepad $PROFILE`), since running it in a session only lasts that session:
+
+  ```powershell
+  function prompt { "$([char]27)]1337;CurrentDir=$($PWD.Path)$([char]7)PS $($PWD.Path)> " }
+  ```
+
+  Note it's iTerm2's OSC 1337 `CurrentDir=`; Tabby does not read the more widely documented OSC 7.
+
 - switching directory still costs a fresh ~1s `asbutler` subprocess; the pane makes that legible rather than faster, since querying more widely is the wrong fix
 
 Managing sessions across directories is deliberately not here — that's what `asbutler webui` is for. This pane only ever deals with the focused terminal's directory.
