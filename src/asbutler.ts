@@ -88,6 +88,8 @@ export interface AgentSession {
   locked: boolean
   /** argv that resumes this row, bare binary name; absent when the agent has none. asbutler#5 */
   resume?: string[]
+  /** `messageCount` split up; a part the agent does not record is absent, not 0. */
+  breakdown?: { user?: number, agent?: number, toolCalls?: number, thinking?: number }
 }
 
 export interface RemoveResult {

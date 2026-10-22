@@ -102,7 +102,9 @@ declare const __PLUGIN_BUILD__: string
         <div class="as-title" *ngIf="editingId !== key(s)" [title]="s.title">
           {{ s.title || '(untitled)' }}
         </div>
-        <div class="as-meta">{{ s.agent }} · {{ s.messageCount }} msgs</div>
+        <div class="as-meta" [title]="breakdownHint(s)">
+          {{ s.agent }} · {{ s.messageCount }} msgs{{ yoursSuffix(s) }}
+        </div>
         <!-- stopPropagation first: without it these also hit the row's select/resume handlers. -->
         <span class="as-actions">
           <button class="as-act" *ngIf="isResumable(s)" title="Resume this session"
@@ -226,6 +228,38 @@ export class SessionListTabComponent extends BaseTabComponent {
     return command
       ? `Double-click to run in the terminal beside this list:\n${command}`
       : `asbutler offers no resume command for ${s.agent}`
+  }
+
+  /** The split matters: 554 messages can be 59 things you said. Absent parts are omitted. */
+  yoursSuffix(s: AgentSession): string {
+    const b = s.breakdown
+    if (!b) {
+      return ''
+    }
+    const parts = [['user', b.user], ['agent', b.agent]] as const
+    const shown = parts.filter(([, n]) => n !== undefined).map(([k, n]) => `${k}:${n}`)
+    return shown.length ? ` (${shown.join(' ')})` : ''
+  }
+
+  breakdownHint(s: AgentSession): string {
+    const b = s.breakdown
+    if (!b) {
+      return ''
+    }
+    const parts = [
+      ['you', b.user], ['agent', b.agent], ['tool calls', b.toolCalls], ['thinking', b.thinking],
+    ].filter(([, n]) => n !== undefined)
+    return parts.map(([label, n]) => `${label} ${n}`).join(' · ')
+  }
+
+  storeHint(s: AgentSession): string {
+    if (s.store === 'v1') {
+      return `Kiro's v1 store — read-only here, and opening it copies the session forward`
+    }
+    if (s.store === 'v2') {
+      return `Kiro's v2 store — opening it in v3 copies the session forward, leaving this one`
+    }
+    return `Kiro's ${s.store} store`
   }
 
   /** Rows are keyed by id *and* store: Kiro reuses ids across its v1 and v2 stores. */
